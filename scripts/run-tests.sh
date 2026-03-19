@@ -31,7 +31,10 @@ else
     NC=''
 fi
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
 
 [ -x "$KBOX" ] || die "kbox binary not found at ${KBOX}"
 [ -f "$ROOTFS" ] || die "rootfs image not found at ${ROOTFS}"
@@ -247,7 +250,7 @@ echo ""
 echo "--- Guest test programs ---"
 
 for test_prog in dup-test clock-test signal-test path-escape-test errno-test; do
-    if "$KBOX" image -S "$ROOTFS" -- /bin/sh -c "test -x /opt/tests/${test_prog}" 2>/dev/null; then
+    if "$KBOX" image -S "$ROOTFS" -- /bin/sh -c "test -x /opt/tests/${test_prog}" 2> /dev/null; then
         expect_success "$test_prog" \
             "$KBOX" image -S "$ROOTFS" -- "/opt/tests/${test_prog}"
     else
@@ -261,7 +264,7 @@ echo ""
 echo "--- Networking ---"
 
 # Check if kbox was built with SLIRP support by testing --net flag.
-if "$KBOX" image -S "$ROOTFS" --net -- /bin/true 2>/dev/null; then
+if "$KBOX" image -S "$ROOTFS" --net -- /bin/true 2> /dev/null; then
     expect_output "net-ping-gateway" "bytes from" \
         "$KBOX" image -S "$ROOTFS" --net -- /bin/sh -c "ping -c 1 -W 3 10.0.2.2"
 

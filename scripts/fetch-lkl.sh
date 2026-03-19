@@ -18,7 +18,10 @@ REPO="${KBOX_REPO:-lkl/linux}"
 ASSET="liblkl-${ARCH}.tar.gz"
 SHA256_FILE="scripts/lkl-sha256.txt"
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
 
 mkdir -p "$LKL_DIR"
 
@@ -30,7 +33,7 @@ fi
 
 # --- Method 1: GitHub Releases (curl, no auth) ---
 try_release() {
-    if ! command -v curl >/dev/null 2>&1; then
+    if ! command -v curl > /dev/null 2>&1; then
         return 1
     fi
 
@@ -38,7 +41,7 @@ try_release() {
     TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
         | grep -o '"tag_name": *"lkl-v[^"]*"' \
         | head -1 \
-        | sed 's/.*"lkl-v/lkl-v/; s/"//' 2>/dev/null) || return 1
+        | sed 's/.*"lkl-v/lkl-v/; s/"//' 2> /dev/null) || return 1
 
     if [ -z "$TAG" ]; then
         echo "No lkl-v* release tag found."
@@ -69,7 +72,7 @@ try_release() {
 
 # --- Method 2: gh CLI (Actions artifacts) ---
 try_gh() {
-    if ! command -v gh >/dev/null 2>&1; then
+    if ! command -v gh > /dev/null 2>&1; then
         return 1
     fi
 
@@ -78,7 +81,7 @@ try_gh() {
 
     gh run download --repo "$REPO" \
         --name "$ARTIFACT_NAME" \
-        --dir "$LKL_DIR" 2>/dev/null && return 0
+        --dir "$LKL_DIR" 2> /dev/null && return 0
 
     echo "Direct download failed. Trying latest workflow run..."
     RUN_ID=$(gh run list --repo "$REPO" \
@@ -86,7 +89,7 @@ try_gh() {
         --status completed \
         --limit 1 \
         --json databaseId \
-        --jq '.[0].databaseId' 2>/dev/null) || return 1
+        --jq '.[0].databaseId' 2> /dev/null) || return 1
 
     gh run download "$RUN_ID" \
         --repo "$REPO" \
@@ -102,7 +105,7 @@ if try_release; then
 elif try_gh; then
     :
 else
-    cat >&2 <<EOF
+    cat >&2 << EOF
 Cannot fetch liblkl.a automatically.
 
 Manual download options:

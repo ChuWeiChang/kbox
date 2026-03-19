@@ -35,15 +35,18 @@ else
     NC=''
 fi
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
 
 [ -x "$KBOX" ] || die "kbox binary not found at ${KBOX}"
 [ -f "$ROOTFS" ] || die "rootfs image not found at ${ROOTFS}"
 
 # Check if timeout command is available.
-if command -v timeout >/dev/null 2>&1; then
+if command -v timeout > /dev/null 2>&1; then
     TIMEOUT_CMD="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
+elif command -v gtimeout > /dev/null 2>&1; then
     TIMEOUT_CMD="gtimeout"
 else
     TIMEOUT_CMD=""
@@ -59,7 +62,7 @@ run_stress_test() {
     printf "  %-40s " "$name"
 
     # Check if the test binary exists in the rootfs.
-    if ! "$KBOX" image -S "$ROOTFS" -- /bin/sh -c "test -x '$guest_path'" 2>/dev/null; then
+    if ! "$KBOX" image -S "$ROOTFS" -- /bin/sh -c "test -x '$guest_path'" 2> /dev/null; then
         printf "${YELLOW}SKIP${NC} (not in rootfs)\n"
         SKIP=$((SKIP + 1))
         return

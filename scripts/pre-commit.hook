@@ -4,17 +4,17 @@
 
 common_script="$(dirname "$0")/../../scripts/common.sh"
 [ -r "$common_script" ] || {
-	echo "[!] '$common_script' not found or not readable." >&2
-	exit 1
+    echo "[!] '$common_script' not found or not readable." >&2
+    exit 1
 }
-bash -n "$common_script" >/dev/null 2>&1 || {
-	echo "[!] '$common_script' contains syntax errors." >&2
-	exit 1
+bash -n "$common_script" > /dev/null 2>&1 || {
+    echo "[!] '$common_script' contains syntax errors." >&2
+    exit 1
 }
 source "$common_script"
-declare -F set_colors >/dev/null 2>&1 || {
-	echo "[!] '$common_script' does not define the required function." >&2
-	exit 1
+declare -F set_colors > /dev/null 2>&1 || {
+    echo "[!] '$common_script' does not define the required function." >&2
+    exit 1
 }
 
 set_colors
@@ -27,103 +27,103 @@ TOTAL_CHECKS=7
 CURRENT_CHECK=0
 
 update_progress() {
-	local check_name="$1"
-	((CURRENT_CHECK++))
-	printf "\r${CYAN}[%d/%d]${NC} %s..." "$CURRENT_CHECK" "$TOTAL_CHECKS" "$check_name"
+    local check_name="$1"
+    ((CURRENT_CHECK++))
+    printf "\r${CYAN}[%d/%d]${NC} %s..." "$CURRENT_CHECK" "$TOTAL_CHECKS" "$check_name"
 }
 
 report_result() {
-	local status="$1"
-	local message="$2"
-	if [ "$status" -eq 0 ]; then
-		printf " [ ${GREEN}OK${NC} ]\n"
-	else
-		printf " [ ${RED}FAIL${NC} ]\n"
-		if [ -n "$message" ]; then
-			ERRORS_FOUND+=("$message")
-		fi
-	fi
+    local status="$1"
+    local message="$2"
+    if [ "$status" -eq 0 ]; then
+        printf " [ ${GREEN}OK${NC} ]\n"
+    else
+        printf " [ ${RED}FAIL${NC} ]\n"
+        if [ -n "$message" ]; then
+            ERRORS_FOUND+=("$message")
+        fi
+    fi
 }
 
 # Build cppcheck suppressions for kbox sources.
 cppcheck_suppressions() {
-	local -a suppr_keys=(
-		"checkersReport"
-		"unmatchedSuppression"
-		"normalCheckLevelMaxBranches"
-		"missingIncludeSystem"
-		"noValidConfiguration"
-		"unusedFunction"
-		"syntaxError"
-		"constParameterPointer"
-		"unusedStructMember"
-		"redundantAssignment"
-		"staticFunction"
-		"checkLevelNormal"
-	)
+    local -a suppr_keys=(
+        "checkersReport"
+        "unmatchedSuppression"
+        "normalCheckLevelMaxBranches"
+        "missingIncludeSystem"
+        "noValidConfiguration"
+        "unusedFunction"
+        "syntaxError"
+        "constParameterPointer"
+        "unusedStructMember"
+        "redundantAssignment"
+        "staticFunction"
+        "checkLevelNormal"
+    )
 
-	local out="--inline-suppr "
-	for key in "${suppr_keys[@]}"; do
-		out+="--suppress=$key "
-	done
-	printf "%s" "$out" | sed 's/[[:space:]]*$//'
+    local out="--inline-suppr "
+    for key in "${suppr_keys[@]}"; do
+        out+="--suppress=$key "
+    done
+    printf "%s" "$out" | sed 's/[[:space:]]*$//'
 }
 
 # Detect compiler standard defines for cppcheck.
 detect_cc_std() {
-	local STDC_VERSION=""
-	local EXTRA_DEFINES=""
-	if command -v cc >/dev/null 2>&1; then
-		if cc --version 2>/dev/null | grep -q "clang"; then
-			STDC_VERSION=$(cc -dM -E -xc /dev/null | awk '/__STDC_VERSION__/ {print $3}')
-			EXTRA_DEFINES="-D__clang__=1"
-		elif cc --version 2>/dev/null | grep -q "Free Software Foundation"; then
-			STDC_VERSION=$(cc -dM -E -xc /dev/null | awk '/__STDC_VERSION__/ {print $3}')
-			EXTRA_DEFINES="-D__GNUC__=1"
-		fi
-	fi
-	if [ -n "$STDC_VERSION" ]; then
-		EXTRA_DEFINES+=" -D__STDC__=1 -D__STDC_VERSION__=${STDC_VERSION}"
-	fi
-	echo "$EXTRA_DEFINES"
+    local STDC_VERSION=""
+    local EXTRA_DEFINES=""
+    if command -v cc > /dev/null 2>&1; then
+        if cc --version 2> /dev/null | grep -q "clang"; then
+            STDC_VERSION=$(cc -dM -E -xc /dev/null | awk '/__STDC_VERSION__/ {print $3}')
+            EXTRA_DEFINES="-D__clang__=1"
+        elif cc --version 2> /dev/null | grep -q "Free Software Foundation"; then
+            STDC_VERSION=$(cc -dM -E -xc /dev/null | awk '/__STDC_VERSION__/ {print $3}')
+            EXTRA_DEFINES="-D__GNUC__=1"
+        fi
+    fi
+    if [ -n "$STDC_VERSION" ]; then
+        EXTRA_DEFINES+=" -D__STDC__=1 -D__STDC_VERSION__=${STDC_VERSION}"
+    fi
+    echo "$EXTRA_DEFINES"
 }
 
 # Resolve clang-format: prefer clang-format-20, fall back to Homebrew LLVM 20.
 CLANG_FORMAT=""
 for cf in clang-format-20 /opt/homebrew/Cellar/llvm@20/*/bin/clang-format; do
-	if command -v "$cf" >/dev/null 2>&1 || [ -x "$cf" ]; then
-		CLANG_FORMAT="$cf"
-		break
-	fi
+    if command -v "$cf" > /dev/null 2>&1 || [ -x "$cf" ]; then
+        CLANG_FORMAT="$cf"
+        break
+    fi
 done
 [ -z "$CLANG_FORMAT" ] && CLANG_FORMAT="clang-format"
 
 # Check for required tools
 check_required_tools() {
-	local missing_tools=()
+    local missing_tools=()
 
-	if ! command -v "$CLANG_FORMAT" >/dev/null 2>&1 && [ ! -x "$CLANG_FORMAT" ]; then
-		missing_tools+=("clang-format-20")
-	fi
+    if ! command -v "$CLANG_FORMAT" > /dev/null 2>&1 && [ ! -x "$CLANG_FORMAT" ]; then
+        missing_tools+=("clang-format-20")
+    fi
 
-	if ! command -v cppcheck >/dev/null 2>&1; then
-		missing_tools+=("cppcheck")
-	fi
+    if ! command -v cppcheck > /dev/null 2>&1; then
+        missing_tools+=("cppcheck")
+    fi
 
-	if ! command -v aspell >/dev/null 2>&1; then
-		missing_tools+=("aspell")
-	elif [ -z "$(aspell dump dicts 2>/dev/null | grep -E '^en$')" ]; then
-		missing_tools+=("aspell-en")
-	fi
+    if ! command -v aspell > /dev/null 2>&1; then
+        missing_tools+=("aspell")
+    elif [ -z "$(aspell dump dicts 2> /dev/null | grep -E '^en$')" ]; then
+        missing_tools+=("aspell-en")
+    fi
 
-	if [ ${#missing_tools[@]} -gt 0 ]; then
-		printf "\n${RED}Missing required tools:${NC}\n"
-		for tool in "${missing_tools[@]}"; do
-			printf "  ${YELLOW}- %s${NC}\n" "$tool"
-		done
-		printf "\n${RED}Please install missing tools and try again.${NC}\n"
-		exit 1
-	fi
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        printf "\n${RED}Missing required tools:${NC}\n"
+        for tool in "${missing_tools[@]}"; do
+            printf "  ${YELLOW}- %s${NC}\n" "$tool"
+        done
+        printf "\n${RED}Please install missing tools and try again.${NC}\n"
+        exit 1
+    fi
 }
 
 printf "${CYAN}Running pre-commit checks...${NC}\n\n"
@@ -139,47 +139,47 @@ workspace=$(git rev-parse --show-toplevel)
 mapfile -t FILES < <(git diff --cached --name-only --diff-filter=ACM)
 
 if [ ${#FILES[@]} -eq 0 ]; then
-	printf "${YELLOW}No files staged for commit.${NC}\n"
-	exit 0
+    printf "${YELLOW}No files staged for commit.${NC}\n"
+    exit 0
 fi
 
 # === CHECK 1: Workspace path validation ===
 update_progress "Checking workspace path"
 if echo "$workspace" | LC_ALL=C grep -q "[一-龥]"; then
-	report_result 1 "Workspace path contains non-ASCII characters"
-	RETURN=1
+    report_result 1 "Workspace path contains non-ASCII characters"
+    RETURN=1
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 2: Merge conflict markers ===
 update_progress "Checking for merge conflicts"
 CONFLICT_MARKERS=$(printf '%s|%s|%s' "<<<<<<<" "=======" ">>>>>>>")
-CONFLICT_FILES=$(git diff --cached --name-only -G "${CONFLICT_MARKERS}" |
-	grep -vE '(^|/)\.git/hooks/|(^|/)(pre-commit|commit-msg|prepare-commit-msg|pre-push)\.hook$')
+CONFLICT_FILES=$(git diff --cached --name-only -G "${CONFLICT_MARKERS}" \
+    | grep -vE '(^|/)\.git/hooks/|(^|/)(pre-commit|commit-msg|prepare-commit-msg|pre-push)\.hook$')
 if [ -n "${CONFLICT_FILES}" ]; then
-	report_result 1 "Conflict markers found in: ${CONFLICT_FILES}"
-	RETURN=1
+    report_result 1 "Conflict markers found in: ${CONFLICT_FILES}"
+    RETURN=1
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 3: Binary files ===
 update_progress "Checking for binary files"
 binary_files=()
 for file in "${FILES[@]}"; do
-	if [ -f "$file" ]; then
-		mime_info=$(file --mime "$file" 2>/dev/null)
-		if echo "$mime_info" | grep -qi binary; then
-			binary_files+=("$file")
-		fi
-	fi
+    if [ -f "$file" ]; then
+        mime_info=$(file --mime "$file" 2> /dev/null)
+        if echo "$mime_info" | grep -qi binary; then
+            binary_files+=("$file")
+        fi
+    fi
 done
 if [ ${#binary_files[@]} -gt 0 ]; then
-	report_result 1 "Binary files detected: ${binary_files[*]}"
-	WARNINGS_FOUND+=("Binary files should not be committed")
+    report_result 1 "Binary files detected: ${binary_files[*]}"
+    WARNINGS_FOUND+=("Binary files should not be committed")
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 4: Code formatting ===
@@ -187,85 +187,85 @@ update_progress "Checking code formatting"
 mapfile -t C_FILES < <(git diff --cached --name-only --diff-filter=ACMR | grep -E "\.(c|h)$" || true)
 formatting_errors=0
 if [ ${#C_FILES[@]} -gt 0 ]; then
-	for FILE in "${C_FILES[@]}"; do
-		if [ -f "$FILE" ]; then
-			nf=$(git checkout-index --temp "$FILE" | cut -f 1)
-			tempdir=$(mktemp -d) || exit 1
-			newfile=$(mktemp "${tempdir}/${nf}.XXXXXX") || exit 1
-			basename=$(basename "$FILE")
+    for FILE in "${C_FILES[@]}"; do
+        if [ -f "$FILE" ]; then
+            nf=$(git checkout-index --temp "$FILE" | cut -f 1)
+            tempdir=$(mktemp -d) || exit 1
+            newfile=$(mktemp "${tempdir}/${nf}.XXXXXX") || exit 1
+            basename=$(basename "$FILE")
 
-			source="${tempdir}/${basename}"
-			mv "$nf" "$source"
-			cp .clang-format "$tempdir" 2>/dev/null || true
-			"$CLANG_FORMAT" "$source" >"$newfile" 2>/dev/null
+            source="${tempdir}/${basename}"
+            mv "$nf" "$source"
+            cp .clang-format "$tempdir" 2> /dev/null || true
+            "$CLANG_FORMAT" "$source" > "$newfile" 2> /dev/null
 
-			if ! diff -q "${source}" "${newfile}" >/dev/null 2>&1; then
-				formatting_errors=$((formatting_errors + 1))
-				WARNINGS_FOUND+=("$FILE needs formatting (run: clang-format -i $FILE)")
-			fi
-			rm -rf "${tempdir}"
-		fi
-	done
+            if ! diff -q "${source}" "${newfile}" > /dev/null 2>&1; then
+                formatting_errors=$((formatting_errors + 1))
+                WARNINGS_FOUND+=("$FILE needs formatting (run: clang-format -i $FILE)")
+            fi
+            rm -rf "${tempdir}"
+        fi
+    done
 fi
 if [ $formatting_errors -gt 0 ]; then
-	report_result 1 "$formatting_errors file(s) need formatting"
-	RETURN=1
+    report_result 1 "$formatting_errors file(s) need formatting"
+    RETURN=1
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 5: Unsafe functions ===
 update_progress "Checking for unsafe functions"
 unsafe_found=0
 if [ ${#C_FILES[@]} -gt 0 ]; then
-	banned="([^f]gets\()|(sprintf\()|(strcpy\()"
-	for file in "${C_FILES[@]}"; do
-		if [ -f "$file" ]; then
-			filepath="${workspace}/${file}"
-			if grep -qE "${banned}" "${filepath}" 2>/dev/null; then
-				unsafe_found=$((unsafe_found + 1))
-				line_nums=$(grep -nE "${banned}" "${filepath}" | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
-				ERRORS_FOUND+=("Unsafe functions in $file (lines: $line_nums)")
-			fi
-		fi
-	done
+    banned="([^f]gets\()|(sprintf\()|(strcpy\()"
+    for file in "${C_FILES[@]}"; do
+        if [ -f "$file" ]; then
+            filepath="${workspace}/${file}"
+            if grep -qE "${banned}" "${filepath}" 2> /dev/null; then
+                unsafe_found=$((unsafe_found + 1))
+                line_nums=$(grep -nE "${banned}" "${filepath}" | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+                ERRORS_FOUND+=("Unsafe functions in $file (lines: $line_nums)")
+            fi
+        fi
+    done
 fi
 if [ $unsafe_found -gt 0 ]; then
-	report_result 1 "$unsafe_found file(s) contain unsafe functions"
-	RETURN=1
+    report_result 1 "$unsafe_found file(s) contain unsafe functions"
+    RETURN=1
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 6: Static analysis ===
 update_progress "Running static analysis"
 if [ ${#C_FILES[@]} -gt 0 ]; then
-	cppcheck_errors=0
-	for file in "${C_FILES[@]}"; do
-		if [ -f "$file" ]; then
-			if ! cppcheck $CPPCHECK_OPTS "$file" >/dev/null 2>&1; then
-				cppcheck_errors=$((cppcheck_errors + 1))
-			fi
-		fi
-	done
-	if [ $cppcheck_errors -gt 0 ]; then
-		report_result 1 "$cppcheck_errors file(s) failed static analysis"
-		RETURN=1
-	else
-		report_result 0
-	fi
+    cppcheck_errors=0
+    for file in "${C_FILES[@]}"; do
+        if [ -f "$file" ]; then
+            if ! cppcheck $CPPCHECK_OPTS "$file" > /dev/null 2>&1; then
+                cppcheck_errors=$((cppcheck_errors + 1))
+            fi
+        fi
+    done
+    if [ $cppcheck_errors -gt 0 ]; then
+        report_result 1 "$cppcheck_errors file(s) failed static analysis"
+        RETURN=1
+    else
+        report_result 0
+    fi
 else
-	report_result 0
+    report_result 0
 fi
 
 # === CHECK 7: Non-ASCII filenames ===
 update_progress "Checking filenames"
-if test $(git diff --cached --name-only --diff-filter=A -z |
-	LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0; then
-	report_result 1 "Non-ASCII filename detected"
-	RETURN=1
+if test $(git diff --cached --name-only --diff-filter=A -z \
+    | LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0; then
+    report_result 1 "Non-ASCII filename detected"
+    RETURN=1
 else
-	report_result 0
+    report_result 0
 fi
 
 printf "\r%*s\r" 50 ""
@@ -274,7 +274,7 @@ printf "\n"
 
 printf "${CYAN}Files to be committed:${NC}\n"
 for file in "${FILES[@]}"; do
-	summary=$(git diff --cached --numstat "$file" 2>/dev/null | awk '{
+    summary=$(git diff --cached --numstat "$file" 2> /dev/null | awk '{
     if ($1 != "0" && $2 != "0")
       printf "+%s/-%s", $1, $2;
     else if ($1 != "0")
@@ -282,31 +282,31 @@ for file in "${FILES[@]}"; do
     else if ($2 != "0")
       printf "-%s", $2;
   }')
-	if [ -n "$summary" ]; then
-		printf "  ${WHITE}%-40s${NC} ${GREEN}%s${NC}\n" "$file" "$summary"
-	else
-		printf "  ${WHITE}%s${NC}\n" "$file"
-	fi
+    if [ -n "$summary" ]; then
+        printf "  ${WHITE}%-40s${NC} ${GREEN}%s${NC}\n" "$file" "$summary"
+    else
+        printf "  ${WHITE}%s${NC}\n" "$file"
+    fi
 done
 
 if [ ${#ERRORS_FOUND[@]} -gt 0 ]; then
-	printf "\n${RED}Errors found:${NC}\n"
-	for error in "${ERRORS_FOUND[@]}"; do
-		printf "  [ ${RED}FAIL${NC} ] %s\n" "$error"
-	done
+    printf "\n${RED}Errors found:${NC}\n"
+    for error in "${ERRORS_FOUND[@]}"; do
+        printf "  [ ${RED}FAIL${NC} ] %s\n" "$error"
+    done
 fi
 
 if [ ${#WARNINGS_FOUND[@]} -gt 0 ]; then
-	printf "\n${YELLOW}Warnings:${NC}\n"
-	for warning in "${WARNINGS_FOUND[@]}"; do
-		printf "  ${YELLOW}!${NC} %s\n" "$warning"
-	done
+    printf "\n${YELLOW}Warnings:${NC}\n"
+    for warning in "${WARNINGS_FOUND[@]}"; do
+        printf "  ${YELLOW}!${NC} %s\n" "$warning"
+    done
 fi
 
 if [ $RETURN -eq 0 ]; then
-	printf "\n${GREEN}All checks passed!${NC}\n"
+    printf "\n${GREEN}All checks passed!${NC}\n"
 else
-	printf "\n${RED}Pre-commit checks failed. Please fix the issues above.${NC}\n"
+    printf "\n${RED}Pre-commit checks failed. Please fix the issues above.${NC}\n"
 fi
 
 exit $RETURN

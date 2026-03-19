@@ -28,7 +28,10 @@ ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}.0-${ALPINE_ARCH}.tar.gz"
 ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ALPINE_ARCH}/${ALPINE_TARBALL}"
 ALPINE_SHA256_FILE="scripts/alpine-sha256.txt"
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
 
 cleanup() {
     if [ -n "$STAGING" ] && [ -d "$STAGING" ]; then
@@ -37,8 +40,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v mke2fs >/dev/null 2>&1 || die "mke2fs not found. Install e2fsprogs."
-command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found."
+command -v mke2fs > /dev/null 2>&1 || die "mke2fs not found. Install e2fsprogs."
+command -v sha256sum > /dev/null 2>&1 || die "sha256sum not found."
 
 # Download Alpine minirootfs (cached in deps/).
 mkdir -p "$CACHE_DIR"
@@ -46,9 +49,9 @@ TARBALL_PATH="${CACHE_DIR}/${ALPINE_TARBALL}"
 
 if [ ! -f "$TARBALL_PATH" ]; then
     echo "Downloading Alpine minirootfs ${ALPINE_VERSION} (${ALPINE_ARCH})..."
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl > /dev/null 2>&1; then
         curl -fSL -o "$TARBALL_PATH" "$ALPINE_URL" || die "Download failed."
-    elif command -v wget >/dev/null 2>&1; then
+    elif command -v wget > /dev/null 2>&1; then
         wget -q -O "$TARBALL_PATH" "$ALPINE_URL" || die "Download failed."
     else
         die "Neither curl nor wget found."
@@ -75,20 +78,20 @@ tar xzf "$TARBALL_PATH" -C "$STAGING"
 
 # Ensure key directories exist.
 for d in bin sbin usr/bin usr/sbin lib lib64 etc tmp home root \
-         var var/tmp dev proc sys run opt opt/stress; do
+    var var/tmp dev proc sys run opt opt/stress; do
     mkdir -p "${STAGING}/${d}"
 done
 
 # Inject /etc/passwd and /etc/group if not present (Alpine has them).
 if [ ! -f "${STAGING}/etc/passwd" ]; then
-    cat > "${STAGING}/etc/passwd" <<'EOF'
+    cat > "${STAGING}/etc/passwd" << 'EOF'
 root:x:0:0:root:/root:/bin/sh
 nobody:x:65534:65534:nobody:/nonexistent:/bin/false
 EOF
 fi
 
 if [ ! -f "${STAGING}/etc/group" ]; then
-    cat > "${STAGING}/etc/group" <<'EOF'
+    cat > "${STAGING}/etc/group" << 'EOF'
 root:x:0:
 tty:x:5:
 nogroup:x:65534:
@@ -96,7 +99,7 @@ EOF
 fi
 
 # Shell profile.
-cat > "${STAGING}/root/.profile" <<'EOF'
+cat > "${STAGING}/root/.profile" << 'EOF'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export PS1='kbox# '
@@ -117,7 +120,7 @@ fi
 if [ -d "$STRESS_DIR" ]; then
     mkdir -p "${STAGING}/opt/stress"
     for prog in "$STRESS_DIR"/*; do
-        case "$prog" in *.c|*.h|*.o) continue ;; esac
+        case "$prog" in *.c | *.h | *.o) continue ;; esac
         if [ -x "$prog" ]; then
             cp "$prog" "${STAGING}/opt/stress/"
         fi
@@ -130,6 +133,6 @@ echo "Creating ${SIZE_MB}MB ext4 image at ${OUTFILE}..."
 # mke2fs -d populates the image without requiring root.
 mke2fs -t ext4 -d "$STAGING" -L kbox-rootfs \
     -b 4096 -r 1 -N 0 \
-    "$OUTFILE" "${SIZE_MB}M" 2>/dev/null
+    "$OUTFILE" "${SIZE_MB}M" 2> /dev/null
 
 echo "OK: ${OUTFILE} ($(du -h "$OUTFILE" | cut -f1))"
