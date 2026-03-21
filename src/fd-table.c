@@ -1,25 +1,23 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * fd-table.c - Virtual FD table mapping guest FDs to LKL FDs.
+
+/* Virtual FD table mapping guest FDs to LKL FDs.
  *
  * Two backing stores:
  *   - entries[]:  FDs in [KBOX_FD_BASE, KBOX_FD_BASE + KBOX_FD_TABLE_MAX)
- *   - low_fds[]:  FDs in [0, KBOX_LOW_FD_MAX)  -- populated only by dup2/dup3
+ *   - low_fds[]:  FDs in [0, KBOX_LOW_FD_MAX); populated only by dup2/dup3
  *
- * A slot is free when lkl_fd == -1.  All lookups go through fd_lookup()
- * which handles both ranges in O(1).
+ * A slot is free when lkl_fd == -1.  All lookups go through fd_lookup() which
+ * handles both ranges in O(1).
  */
-
-#include "kbox/fd-table.h"
-
-#include "kbox/lkl-wrap.h"
-#include "kbox/syscall-nr.h"
 
 #include <unistd.h>
 
-/*
- * Unified entry lookup.  Returns a pointer to the kbox_fd_entry for
- * the given FD, or NULL if the FD is in neither range.
+#include "fd-table.h"
+#include "lkl-wrap.h"
+
+/* Unified entry lookup.
+ * Returns a pointer to the kbox_fd_entry for the given FD, or NULL if the FD
+ * is in neither range.
  */
 static struct kbox_fd_entry *fd_lookup(const struct kbox_fd_table *t, long fd)
 {
@@ -51,8 +49,7 @@ void kbox_fd_table_init(struct kbox_fd_table *t)
     t->next_fd = KBOX_FD_BASE;
 }
 
-/*
- * Auto-allocate: always from the high range (>= KBOX_FD_BASE).
+/* Auto-allocate: always from the high range (>= KBOX_FD_BASE).
  * Low FDs are only populated via insert_at (dup2/dup3).
  */
 long kbox_fd_table_insert(struct kbox_fd_table *t, long lkl_fd, int mirror_tty)
@@ -137,9 +134,10 @@ long kbox_fd_table_remove(struct kbox_fd_table *t, long fd)
 
     old = e->lkl_fd;
 #ifndef KBOX_UNIT_TEST
-    /* For shadow sockets (shadow_sp >= 0), host_fd is a tracee-namespace
-     * FD number from ADDFD, NOT a supervisor-owned FD.  Don't close it
-     * in the supervisor -- it would close an unrelated local FD. */
+    /* For shadow sockets (shadow_sp >= 0), host_fd is a tracee-namespace FD
+     * number from ADDFD, NOT a supervisor-owned FD. Don't close it in the
+     * supervisor; it would close an unrelated local FD.
+     */
     if (e->host_fd >= 0 && e->shadow_sp < 0)
         close((int) e->host_fd);
     if (e->shadow_sp >= 0)
@@ -177,6 +175,7 @@ int kbox_fd_table_get_cloexec(const struct kbox_fd_table *t, long fd)
     return e->cloexec;
 }
 
+#ifndef KBOX_UNIT_TEST
 static void clear_entry(struct kbox_fd_entry *e)
 {
     e->lkl_fd = -1;
@@ -186,7 +185,6 @@ static void clear_entry(struct kbox_fd_entry *e)
     e->cloexec = 0;
 }
 
-#ifndef KBOX_UNIT_TEST
 /* Check if any other entry in the table references the same lkl_fd. */
 static int lkl_fd_has_other_ref(const struct kbox_fd_table *t,
                                 const struct kbox_fd_entry *skip,
@@ -207,11 +205,12 @@ static void close_cloexec_entry(struct kbox_fd_table *t,
                                 const struct kbox_sysnrs *s)
 {
     if (e->lkl_fd != -1 && e->cloexec) {
-        /* Only close the LKL socket if no other entry shares it
-         * (handles dup'd shadow sockets where multiple entries
-         * reference the same lkl_fd). */
+        /* Only close the LKL socket if no other entry shares it (handles dup'd
+         * shadow sockets where multiple entries reference the same lkl_fd).
+         */
         if (!lkl_fd_has_other_ref(t, e, e->lkl_fd))
             kbox_lkl_close(s, e->lkl_fd);
+
         /* Shadow sockets: host_fd is tracee-namespace, don't close. */
         if (e->host_fd >= 0 && e->shadow_sp < 0) {
             close((int) e->host_fd);
@@ -272,4 +271,20 @@ long kbox_fd_table_find_by_host_fd(const struct kbox_fd_table *t, long host_fd)
             return i + KBOX_FD_BASE;
     }
     return -1;
+}
+
+unsigned kbox_fd_table_count(const struct kbox_fd_table *t)
+{
+    unsigned n = 0;
+    int i;
+
+    for (i = 0; i < KBOX_LOW_FD_MAX; i++) {
+        if (t->low_fds[i].lkl_fd != -1)
+            n++;
+    }
+    for (i = 0; i < KBOX_FD_TABLE_MAX; i++) {
+        if (t->entries[i].lkl_fd != -1)
+            n++;
+    }
+    return n;
 }

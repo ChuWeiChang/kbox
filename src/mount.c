@@ -1,27 +1,23 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * mount.c - Filesystem mount helpers for the LKL guest.
- *
- * Sets up the recommended virtual filesystems (proc, sysfs, devtmpfs,
- * devpts, tmpfs) and applies user-specified bind mounts.  All
- * operations go through LKL syscall wrappers -- nothing touches the
- * host kernel.
- *
- */
 
-#include "kbox/mount.h"
-#include "kbox/lkl-wrap.h"
+/* Filesystem mount helpers for the LKL guest.
+ *
+ * Sets up the recommended virtual filesystems (proc, sysfs, devtmpfs, devpts,
+ * tmpfs) and applies user-specified bind mounts. All operations go through LKL
+ * syscall wrappers; nothing touches the host kernel.
+ */
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "kbox/mount.h"
+#include "lkl-wrap.h"
+
 /* MS_BIND from <linux/mount.h> without pulling the full header. */
 #define KBOX_MS_BIND 0x1000
 
-/* ------------------------------------------------------------------ */
-/* Bind-mount spec parser                                              */
-/* ------------------------------------------------------------------ */
+/* Bind-mount spec parser. */
 
 int kbox_parse_bind_spec(const char *spec, struct kbox_bind_spec *out)
 {
@@ -64,9 +60,7 @@ int kbox_parse_bind_spec(const char *spec, struct kbox_bind_spec *out)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Internal: mkdir + mount, tolerating EEXIST on mkdir                  */
-/* ------------------------------------------------------------------ */
+/* Internal: mkdir + mount, tolerating EEXIST on mkdir. */
 
 static int do_mkdir_mount(const struct kbox_sysnrs *s,
                           const char *target,
@@ -91,14 +85,12 @@ static int do_mkdir_mount(const struct kbox_sysnrs *s,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Recommended mounts                                                  */
-/* ------------------------------------------------------------------ */
+/* Recommended mounts. */
 
 int kbox_apply_recommended_mounts(const struct kbox_sysnrs *s,
                                   enum kbox_mount_profile profile)
 {
-    /* proc is always mounted -- needed for /proc/self/fd, /proc/sys */
+    /* proc is always mounted; needed for /proc/self/fd, /proc/sys */
     if (do_mkdir_mount(s, "/proc", "proc", "proc") < 0)
         return -1;
 
@@ -106,11 +98,17 @@ int kbox_apply_recommended_mounts(const struct kbox_sysnrs *s,
         if (do_mkdir_mount(s, "/sys", "sysfs", "sysfs") < 0)
             return -1;
 
+        /* devtmpfs and devpts require CONFIG_DEVTMPFS / CONFIG_DEVPTS_FS
+         * in the LKL kernel. Warn on failure instead of aborting; the guest
+         * can operate without them.
+         */
         if (do_mkdir_mount(s, "/dev", "devtmpfs", "devtmpfs") < 0)
-            return -1;
+            fprintf(stderr,
+                    "warning: devtmpfs unavailable (CONFIG_DEVTMPFS?)\n");
 
         if (do_mkdir_mount(s, "/dev/pts", "devpts", "devpts") < 0)
-            return -1;
+            fprintf(stderr,
+                    "warning: devpts unavailable (CONFIG_DEVPTS_FS?)\n");
     }
 
     /* tmpfs on /tmp is always useful */
@@ -120,9 +118,7 @@ int kbox_apply_recommended_mounts(const struct kbox_sysnrs *s,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Bind mounts                                                         */
-/* ------------------------------------------------------------------ */
+/* Bind mounts. */
 
 int kbox_apply_bind_mounts(const struct kbox_sysnrs *s,
                            const struct kbox_bind_spec *specs,

@@ -1,29 +1,17 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * seccomp-dispatch.c - Syscall dispatch engine for the seccomp supervisor.
+
+/* Syscall dispatch engine for the seccomp supervisor.
  *
- * Each intercepted syscall notification is dispatched to a handler that
- * either forwards it through LKL (RETURN) or lets the host kernel handle
- * it (CONTINUE).  This is the beating heart of kbox: every file open,
- * read, write, stat, and directory operation the tracee makes gets
- * routed through here.
+ * Each intercepted syscall notification is dispatched to a handler that either
+ * forwards it through LKL (RETURN) or lets host kernel handle it (CONTINUE).
+ * This is the beating heart of kbox: every file open, read, write, stat, and
+ * directory operation the tracee makes gets routed through here.
  *
  */
 
-#include "kbox/elf.h"
-#include "kbox/fd-table.h"
-#include "kbox/identity.h"
-#include "kbox/lkl-wrap.h"
-#include "kbox/net.h"
-#include "kbox/path.h"
-#include "kbox/procmem.h"
-#include "kbox/seccomp.h"
-#include "kbox/shadow-fd.h"
-#include "kbox/syscall-nr.h"
-
 #include <errno.h>
 #include <fcntl.h>
-/* seccomp types via kbox/seccomp.h -> kbox/seccomp-defs.h */
+/* seccomp types via seccomp.h -> seccomp-defs.h */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,9 +23,18 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
-/* Argument extraction helpers                                        */
-/* ------------------------------------------------------------------ */
+#include "fd-table.h"
+#include "kbox/elf.h"
+#include "kbox/identity.h"
+#include "kbox/path.h"
+#include "lkl-wrap.h"
+#include "net.h"
+#include "procmem.h"
+#include "seccomp.h"
+#include "shadow-fd.h"
+#include "syscall-nr.h"
+
+/* Argument extraction helpers. */
 
 static inline int64_t to_c_long_arg(uint64_t v)
 {
@@ -49,12 +46,9 @@ static inline long to_dirfd_arg(uint64_t v)
     return (long) (int) (uint32_t) v;
 }
 
-/* ------------------------------------------------------------------ */
-/* Open-flag ABI translation (aarch64 host <-> asm-generic LKL)       */
-/* ------------------------------------------------------------------ */
+/* Open-flag ABI translation (aarch64 host <-> asm-generic LKL). */
 
-/*
- * aarch64 and asm-generic define four O_* flags differently:
+/* aarch64 and asm-generic define four O_* flags differently:
  *
  *   Flag         aarch64     asm-generic (LKL)
  *   O_DIRECTORY  0x04000     0x10000
@@ -120,21 +114,18 @@ static inline long lkl_to_host_open_flags(long flags)
 
 #endif
 
-/* ------------------------------------------------------------------ */
-/* Stat ABI conversion                                                */
-/* ------------------------------------------------------------------ */
+/* Stat ABI conversion. */
 
-/*
- * Convert LKL's generic-arch stat layout to the host's struct stat.
+/* Convert LKL's generic-arch stat layout to the host's struct stat.
  *
- * LKL always fills stat buffers using the asm-generic layout regardless
- * of the host architecture.  On x86_64 the two layouts differ:
+ * LKL always fills stat buffers using the asm-generic layout regardless of the
+ * host architecture. On x86_64 the two layouts differ:
  *   generic: st_mode (u32) at offset 16, st_nlink (u32) at offset 20
  *   x86_64:  st_nlink (u64) at offset 16, st_mode (u32) at offset 24
  *
- * On aarch64 the kernel uses the generic layout, but the C library's
- * struct stat may still have different padding, so convert explicitly
- * on all architectures.
+ * On aarch64 the kernel uses the generic layout, but the C library's struct
+ * stat may still have different padding, so convert explicitly on all
+ * architectures.
  */
 static void kbox_lkl_stat_to_host(const struct kbox_lkl_stat *src,
                                   struct stat *dst)
@@ -158,9 +149,7 @@ static void kbox_lkl_stat_to_host(const struct kbox_lkl_stat *src,
     dst->st_ctim.tv_nsec = (long) src->st_ctime_nsec;
 }
 
-/* ------------------------------------------------------------------ */
-/* Dispatch result constructors                                       */
-/* ------------------------------------------------------------------ */
+/* Dispatch result constructors. */
 
 struct kbox_dispatch kbox_dispatch_continue(void)
 {
@@ -198,17 +187,14 @@ struct kbox_dispatch kbox_dispatch_from_lkl(long ret)
     return kbox_dispatch_value((int64_t) ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* Path and FD helper functions                                       */
-/* ------------------------------------------------------------------ */
+/* Path and FD helper functions. */
 
-/*
- * Resolve dirfd for *at() syscalls.
+/* Resolve dirfd for *at() syscalls.
  *
- * If the path is absolute, AT_FDCWD is fine regardless of dirfd.
- * If the dirfd is AT_FDCWD, pass it through.
- * Otherwise look up the virtual FD in the table to get the LKL fd.
- * Returns -1 if the fd is not in the table (caller should CONTINUE).
+ * If the path is absolute, AT_FDCWD is fine regardless of dirfd.  If the
+ * dirfd is AT_FDCWD, pass it through.  Otherwise look up the virtual FD in
+ * the table to get the LKL fd.  Returns -1 if the fd is not in the table
+ * (caller should CONTINUE).
  */
 static long resolve_open_dirfd(const char *path,
                                long dirfd,
@@ -221,14 +207,55 @@ static long resolve_open_dirfd(const char *path,
     return kbox_fd_table_get_lkl(table, dirfd);
 }
 
-/*
- * Attempt to create a shadow memfd for an O_RDONLY regular file and
- * inject it into the tracee.  On success, records the host_fd in the
- * FD table and returns the host-visible FD number via *out_fd.
+static int read_guest_string(pid_t pid, uint64_t addr, char *buf, size_t size)
+{
+    return kbox_vm_read_string(pid, addr, buf, size);
+}
+
+static int translate_guest_path(pid_t pid,
+                                uint64_t addr,
+                                const char *host_root,
+                                char *translated,
+                                size_t size)
+{
+    char pathbuf[KBOX_MAX_PATH];
+    int rc = read_guest_string(pid, addr, pathbuf, sizeof(pathbuf));
+    if (rc < 0)
+        return rc;
+    return kbox_translate_path_for_lkl(pid, pathbuf, host_root, translated,
+                                       size);
+}
+
+static int translate_guest_at_path(const struct kbox_seccomp_notif *notif,
+                                   struct kbox_supervisor_ctx *ctx,
+                                   size_t dirfd_idx,
+                                   size_t path_idx,
+                                   char *translated,
+                                   size_t size,
+                                   long *lkl_dirfd)
+{
+    int rc = translate_guest_path(notif->pid, notif->data.args[path_idx],
+                                  ctx->host_root, translated, size);
+    if (rc < 0)
+        return rc;
+
+    *lkl_dirfd = resolve_open_dirfd(
+        translated, to_dirfd_arg(notif->data.args[dirfd_idx]), ctx->fd_table);
+    return 0;
+}
+
+static int should_continue_for_dirfd(long lkl_dirfd)
+{
+    return lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX;
+}
+
+/* Attempt to create a shadow memfd for an O_RDONLY regular file and inject
+ * it into the tracee.  On success, records the host_fd in the FD table and
+ * returns the host-visible FD number via *out_fd.
  *
- * Returns 1 if shadowing succeeded (caller should return *out_fd),
- * 0 if shadowing is not applicable or failed (caller falls through
- * to the virtual FD path).
+ * Returns 1 if shadowing succeeded (caller should return *out_fd), 0 if
+ * shadowing is not applicable or failed (caller falls through to virtual
+ * FD path).
  */
 static int try_shadow_open(struct kbox_supervisor_ctx *ctx,
                            const struct kbox_seccomp_notif *notif,
@@ -247,11 +274,10 @@ static int try_shadow_open(struct kbox_supervisor_ctx *ctx,
 
     int memfd = kbox_shadow_create(ctx->sysnrs, lkl_fd);
     if (memfd < 0)
-        return 0; /* not shadowable -- fall through to virtual FD */
+        return 0; /* not shadowable; fall through to virtual FD */
 
-    /*
-     * Inject the memfd into the tracee.  The tracee gets its own
-     * FD pointing at the same memfd; we close our copy afterward.
+    /* Inject the memfd into the tracee.  The tracee gets its own FD
+     * pointing at the same memfd; we close our copy afterward.
      */
     int host_fd = kbox_notify_addfd(ctx->listener_fd, notif->id, memfd, 0);
     if (host_fd < 0) {
@@ -274,102 +300,180 @@ static int try_shadow_open(struct kbox_supervisor_ctx *ctx,
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_openat                                                     */
-/* ------------------------------------------------------------------ */
+/* statx struct field offsets (standard on x86_64 and aarch64). */
+#define STATX_MODE_OFFSET 0x20
+#define STATX_UID_OFFSET 0x48
+#define STATX_GID_OFFSET 0x4c
+#define STATX_BUF_SIZE 0x100
+
+static struct kbox_dispatch finish_open_dispatch(
+    struct kbox_supervisor_ctx *ctx,
+    const struct kbox_seccomp_notif *notif,
+    long lkl_fd,
+    long flags,
+    const char *translated)
+{
+    long shadow_fd;
+
+    if (try_shadow_open(ctx, notif, lkl_fd, flags, translated, &shadow_fd)) {
+        if (shadow_fd < 0)
+            return kbox_dispatch_errno((int) (-shadow_fd));
+        return kbox_dispatch_value((int64_t) shadow_fd);
+    }
+
+    long vfd = kbox_fd_table_insert(ctx->fd_table, lkl_fd,
+                                    kbox_is_tty_like_path(translated));
+    if (vfd < 0) {
+        kbox_lkl_close(ctx->sysnrs, lkl_fd);
+        return kbox_dispatch_errno(EMFILE);
+    }
+    return kbox_dispatch_value((int64_t) vfd);
+}
+
+static void normalize_host_stat_if_needed(struct kbox_supervisor_ctx *ctx,
+                                          const char *path,
+                                          struct stat *host_stat)
+{
+    if (!ctx->normalize)
+        return;
+
+    uint32_t n_mode, n_uid, n_gid;
+    if (!kbox_normalized_permissions(path, &n_mode, &n_uid, &n_gid))
+        return;
+
+    host_stat->st_mode = (host_stat->st_mode & S_IFMT) | (n_mode & ~S_IFMT);
+    host_stat->st_uid = n_uid;
+    host_stat->st_gid = n_gid;
+}
+
+static void normalize_statx_if_needed(struct kbox_supervisor_ctx *ctx,
+                                      const char *path,
+                                      uint8_t *statx_buf)
+{
+    if (!ctx->normalize)
+        return;
+
+    uint32_t n_mode, n_uid, n_gid;
+    if (!kbox_normalized_permissions(path, &n_mode, &n_uid, &n_gid))
+        return;
+
+    uint16_t mode_le = (uint16_t) n_mode;
+    memcpy(&statx_buf[STATX_MODE_OFFSET], &mode_le, 2);
+    memcpy(&statx_buf[STATX_UID_OFFSET], &n_uid, 4);
+    memcpy(&statx_buf[STATX_GID_OFFSET], &n_gid, 4);
+}
+
+typedef long (*kbox_getdents_fn)(const struct kbox_sysnrs *sysnrs,
+                                 long fd,
+                                 void *buf,
+                                 long count);
+
+static struct kbox_dispatch forward_getdents_common(
+    const struct kbox_seccomp_notif *notif,
+    struct kbox_supervisor_ctx *ctx,
+    kbox_getdents_fn getdents_fn)
+{
+    long fd = to_c_long_arg(notif->data.args[0]);
+    long lkl_fd = kbox_fd_table_get_lkl(ctx->fd_table, fd);
+    uint64_t remote_dirp = notif->data.args[1];
+    int64_t count_raw = to_c_long_arg(notif->data.args[2]);
+    size_t count, n;
+    uint8_t *buf;
+    long ret;
+    int wrc;
+
+    if (lkl_fd < 0)
+        return kbox_dispatch_continue();
+    if (count_raw < 0)
+        return kbox_dispatch_errno(EINVAL);
+
+    count = (size_t) count_raw;
+    if (count == 0)
+        return kbox_dispatch_value(0);
+    if (remote_dirp == 0)
+        return kbox_dispatch_errno(EFAULT);
+    if (count > 1024 * 1024)
+        count = 1024 * 1024;
+
+    buf = malloc(count);
+    if (!buf)
+        return kbox_dispatch_errno(ENOMEM);
+
+    ret = getdents_fn(ctx->sysnrs, lkl_fd, buf, (long) count);
+    if (ret < 0) {
+        free(buf);
+        return kbox_dispatch_errno((int) (-ret));
+    }
+
+    n = (size_t) ret;
+    if (n > count) {
+        free(buf);
+        return kbox_dispatch_errno(EIO);
+    }
+
+    wrc = kbox_vm_write(notif->pid, remote_dirp, buf, n);
+    free(buf);
+    if (wrc < 0)
+        return kbox_dispatch_errno(-wrc);
+    return kbox_dispatch_value((int64_t) n);
+}
+
+/* forward_openat. */
 
 static struct kbox_dispatch forward_openat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
+    char translated[KBOX_MAX_PATH];
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
     long flags = host_to_lkl_open_flags(to_c_long_arg(notif->data.args[2]));
     long mode = to_c_long_arg(notif->data.args[3]);
 
-    /* Image mode: translate path for LKL. */
-    char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     if (kbox_is_lkl_virtual_path(translated))
         return kbox_dispatch_continue();
     if (kbox_is_tty_like_path(translated))
         return kbox_dispatch_continue();
 
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long ret = kbox_lkl_openat(ctx->sysnrs, lkl_dirfd, translated, flags, mode);
     if (ret < 0)
         return kbox_dispatch_errno((int) (-ret));
-
-    /* Try shadow FD for O_RDONLY regular files (enables mmap). */
-    long shadow_fd;
-    if (try_shadow_open(ctx, notif, ret, flags, translated, &shadow_fd)) {
-        if (shadow_fd < 0)
-            return kbox_dispatch_errno((int) (-shadow_fd));
-        return kbox_dispatch_value((int64_t) shadow_fd);
-    }
-
-    int mirror = kbox_is_tty_like_path(translated);
-    long vfd = kbox_fd_table_insert(ctx->fd_table, ret, mirror);
-    if (vfd < 0) {
-        kbox_lkl_close(ctx->sysnrs, ret);
-        return kbox_dispatch_errno(EMFILE);
-    }
-    return kbox_dispatch_value((int64_t) vfd);
+    return finish_open_dispatch(ctx, notif, ret, flags, translated);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_openat2                                                    */
-/* ------------------------------------------------------------------ */
+/* forward_openat2. */
 
 static struct kbox_dispatch forward_openat2(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
+    char translated[KBOX_MAX_PATH];
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
     struct kbox_open_how how;
-    rc = kbox_vm_read_open_how(pid, notif->data.args[2], notif->data.args[3],
-                               &how);
+    rc = kbox_vm_read_open_how(notif->pid, notif->data.args[2],
+                               notif->data.args[3], &how);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
     how.flags = (uint64_t) host_to_lkl_open_flags((long) how.flags);
-
-    char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
 
     if (kbox_is_lkl_virtual_path(translated))
         return kbox_dispatch_continue();
     if (kbox_is_tty_like_path(translated))
         return kbox_dispatch_continue();
 
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long ret = kbox_lkl_openat2(ctx->sysnrs, lkl_dirfd, translated, &how,
@@ -382,50 +486,24 @@ static struct kbox_dispatch forward_openat2(
     }
     if (ret < 0)
         return kbox_dispatch_errno((int) (-ret));
-
-    /* Try shadow FD for O_RDONLY regular files (enables mmap). */
-    long shadow_fd2;
-    if (try_shadow_open(ctx, notif, ret, (long) how.flags, translated,
-                        &shadow_fd2)) {
-        if (shadow_fd2 < 0)
-            return kbox_dispatch_errno((int) (-shadow_fd2));
-        return kbox_dispatch_value((int64_t) shadow_fd2);
-    }
-
-    int mirror = kbox_is_tty_like_path(translated);
-    long vfd = kbox_fd_table_insert(ctx->fd_table, ret, mirror);
-    if (vfd < 0) {
-        kbox_lkl_close(ctx->sysnrs, ret);
-        return kbox_dispatch_errno(EMFILE);
-    }
-    return kbox_dispatch_value((int64_t) vfd);
+    return finish_open_dispatch(ctx, notif, ret, (long) how.flags, translated);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_open_legacy (x86_64 open(2), nr=2)                         */
-/* ------------------------------------------------------------------ */
+/* forward_open_legacy (x86_64 open(2), nr=2). */
 
 static struct kbox_dispatch forward_open_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
+    char translated[KBOX_MAX_PATH];
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
     long flags = host_to_lkl_open_flags(to_c_long_arg(notif->data.args[1]));
     long mode = to_c_long_arg(notif->data.args[2]);
-
-    char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
 
     if (kbox_is_lkl_virtual_path(translated))
         return kbox_dispatch_continue();
@@ -436,27 +514,10 @@ static struct kbox_dispatch forward_open_legacy(
         kbox_lkl_openat(ctx->sysnrs, AT_FDCWD_LINUX, translated, flags, mode);
     if (ret < 0)
         return kbox_dispatch_errno((int) (-ret));
-
-    /* Try shadow FD for O_RDONLY regular files (enables mmap). */
-    long shadow_fd3;
-    if (try_shadow_open(ctx, notif, ret, flags, translated, &shadow_fd3)) {
-        if (shadow_fd3 < 0)
-            return kbox_dispatch_errno((int) (-shadow_fd3));
-        return kbox_dispatch_value((int64_t) shadow_fd3);
-    }
-
-    int mirror = kbox_is_tty_like_path(translated);
-    long vfd = kbox_fd_table_insert(ctx->fd_table, ret, mirror);
-    if (vfd < 0) {
-        kbox_lkl_close(ctx->sysnrs, ret);
-        return kbox_dispatch_errno(EMFILE);
-    }
-    return kbox_dispatch_value((int64_t) vfd);
+    return finish_open_dispatch(ctx, notif, ret, flags, translated);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_close                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_close. */
 
 static struct kbox_dispatch forward_close(
     const struct kbox_seccomp_notif *notif,
@@ -471,10 +532,9 @@ static struct kbox_dispatch forward_close(
             return kbox_dispatch_errno((int) (-ret));
         kbox_fd_table_remove(ctx->fd_table, fd);
 
-        /*
-         * Low FD redirect (from dup2): close the LKL side above,
-         * then CONTINUE so the host kernel also closes its copy
-         * of this FD number.
+        /* Low FD redirect (from dup2): close the LKL side above,
+         * then CONTINUE so the host kernel also closes its copy of
+         * this FD number.
          */
         if (fd < KBOX_LOW_FD_MAX)
             return kbox_dispatch_continue();
@@ -482,11 +542,10 @@ static struct kbox_dispatch forward_close(
         return kbox_dispatch_value(0);
     }
 
-    /*
-     * Not a virtual FD.  Check if this is a host FD that was
-     * injected as a shadow (the tracee closes it by the host number).
-     * If so, close the LKL side and let the host kernel close the
-     * host FD via CONTINUE.
+    /* Not a virtual FD.  Check if this is a host FD that was injected
+     * as shadow (the tracee closes it by the host number).  If so,
+     * close the LKL side and let the host kernel close the host FD
+     * via CONTINUE.
      */
     long vfd = kbox_fd_table_find_by_host_fd(ctx->fd_table, fd);
     if (vfd >= 0) {
@@ -494,9 +553,10 @@ static struct kbox_dispatch forward_close(
         kbox_fd_table_remove(ctx->fd_table, vfd);
 
         if (lkl >= 0) {
-            /* Only close the LKL socket and deregister from the event
-             * loop if no other fd_table entry references the same
-             * lkl_fd (handles dup'd shadow sockets). */
+            /* Only close the LKL socket and deregister from the
+             * event loop if no other fd_table entry references the
+             * same lkl_fd (handles dup'd shadow sockets).
+             */
             int still_ref = 0;
             for (long i = 0; i < KBOX_FD_TABLE_MAX && !still_ref; i++) {
                 if (ctx->fd_table->entries[i].lkl_fd == lkl)
@@ -517,9 +577,7 @@ static struct kbox_dispatch forward_close(
     return kbox_dispatch_continue();
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_read_like (read and pread64)                               */
-/* ------------------------------------------------------------------ */
+/* forward_read_like (read and pread64). */
 
 static struct kbox_dispatch forward_read_like(
     const struct kbox_seccomp_notif *notif,
@@ -594,9 +652,7 @@ static struct kbox_dispatch forward_read_like(
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_write                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_write. */
 
 static struct kbox_dispatch forward_write(
     const struct kbox_seccomp_notif *notif,
@@ -656,10 +712,9 @@ static struct kbox_dispatch forward_write(
 
         size_t n = (size_t) ret;
 
-        /*
-         * Mirror to host stdout if this is a TTY fd.
-         * The guest fd is a virtual number (4096+) that does not exist
-         * on the host side, so we write to stdout instead.
+        /* Mirror to host stdout if this is a TTY fd.  The guest fd
+         * is a virtual number (4096+) that does not exist on the
+         * host side, so we write to stdout instead.
          */
         if (mirror_host && n > 0) {
             (void) write(STDOUT_FILENO, scratch, n);
@@ -674,19 +729,17 @@ static struct kbox_dispatch forward_write(
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_sendfile                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_sendfile. */
 
 /*
  * Emulate sendfile(out_fd, in_fd, *offset, count).
  *
- * If both FDs are host-visible (shadow memfds, stdio, or other host
- * FDs not in the virtual table), let the host kernel handle it via
- * CONTINUE.  Otherwise, emulate via LKL read + host/LKL write.
+ * If both FDs are host-visible (shadow memfds, stdio, or other host FDs
+ * not in the virtual table), let the host kernel handle it via CONTINUE.
+ * Otherwise, emulate via LKL read + host/LKL write.
  *
- * busybox cat uses sendfile and some builds loop on ENOSYS instead
- * of falling back to read+write, so returning ENOSYS is not viable.
+ * busybox cat uses sendfile and some builds loop on ENOSYS instead of
+ * falling back to read+write, so returning ENOSYS is not viable.
  */
 static struct kbox_dispatch forward_sendfile(
     const struct kbox_seccomp_notif *notif,
@@ -701,9 +754,9 @@ static struct kbox_dispatch forward_sendfile(
     long out_lkl = kbox_fd_table_get_lkl(ctx->fd_table, out_fd);
 
     /*
-     * Resolve shadow FDs: if in_fd is a host FD injected via ADDFD
-     * (shadow memfd), find_by_host_fd locates the virtual entry
-     * that holds the LKL FD for the same file.
+     * Resolve shadow FDs: if in_fd is a host FD injected via ADDFD (shadow
+     * memfd), find_by_host_fd locates the virtual entry that holds the LKL
+     * FD for the same file.
      */
     if (in_lkl < 0) {
         long vfd = kbox_fd_table_find_by_host_fd(ctx->fd_table, in_fd);
@@ -717,8 +770,8 @@ static struct kbox_dispatch forward_sendfile(
     }
 
     /*
-     * Both FDs are host-visible (shadow memfds, stdio, pipes, etc.)
-     * and neither has LKL backing.  The host kernel handles sendfile.
+     * Both FDs are host-visible (shadow memfds, stdio, pipes, etc.) and
+     * neither has LKL backing.  The host kernel handles sendfile.
      */
     if (in_lkl < 0 && out_lkl < 0)
         return kbox_dispatch_continue();
@@ -790,8 +843,8 @@ static struct kbox_dispatch forward_sendfile(
         } else {
             /*
              * Destination is a host FD (e.g. stdout).  The supervisor
-             * shares the FD table with the tracee (from fork), so
-             * write() goes to the same file description.
+             * shares the FD table with the tracee (from fork), so write()
+             * goes to the same file description.
              */
             ssize_t wr = write((int) out_fd, scratch, n);
             if (wr < 0) {
@@ -818,9 +871,7 @@ static struct kbox_dispatch forward_sendfile(
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_lseek                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_lseek. */
 
 static struct kbox_dispatch forward_lseek(
     const struct kbox_seccomp_notif *notif,
@@ -838,9 +889,7 @@ static struct kbox_dispatch forward_lseek(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fcntl                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_fcntl. */
 
 static struct kbox_dispatch forward_fcntl(
     const struct kbox_seccomp_notif *notif,
@@ -856,9 +905,10 @@ static struct kbox_dispatch forward_fcntl(
             long scmd = to_c_long_arg(notif->data.args[1]);
             if (scmd == F_DUPFD || scmd == F_DUPFD_CLOEXEC) {
                 long minfd = to_c_long_arg(notif->data.args[2]);
-                /* When minfd > 0, skip ADDFD (can't honor the
-                 * minimum) and let CONTINUE handle it correctly.
-                 * The dup is untracked but no FD leaks. */
+                /* When minfd > 0, skip ADDFD (can't honor the minimum)
+                 * and let CONTINUE handle it correctly.  The dup is
+                 * untracked but no FD leaks.
+                 */
                 struct kbox_fd_entry *orig = NULL;
                 if (minfd > 0)
                     goto fcntl_continue;
@@ -944,9 +994,7 @@ static struct kbox_dispatch forward_fcntl(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_dup                                                        */
-/* ------------------------------------------------------------------ */
+/* forward_dup. */
 
 static struct kbox_dispatch forward_dup(const struct kbox_seccomp_notif *notif,
                                         struct kbox_supervisor_ctx *ctx)
@@ -960,8 +1008,9 @@ static struct kbox_dispatch forward_dup(const struct kbox_seccomp_notif *notif,
         if (orig_vfd < 0)
             return kbox_dispatch_continue();
 
-        /* Shadow socket dup: inject a new copy of the socketpair end
-         * into the tracee and track the new host_fd. */
+        /* Shadow socket dup: inject a new copy of the socketpair end into
+         * the tracee and track the new host_fd.
+         */
         struct kbox_fd_entry *orig = NULL;
         if (orig_vfd >= KBOX_FD_BASE)
             orig = &ctx->fd_table->entries[orig_vfd - KBOX_FD_BASE];
@@ -978,9 +1027,10 @@ static struct kbox_dispatch forward_dup(const struct kbox_seccomp_notif *notif,
 
         long new_vfd = kbox_fd_table_insert(ctx->fd_table, orig_lkl, 0);
         if (new_vfd < 0) {
-            /* Can't track the FD -- return error. The tracee already
-             * has the FD via ADDFD which we can't revoke, but returning
-             * EMFILE tells the caller dup failed so it won't use it. */
+            /* Can't track the FD; return error.  The tracee already has
+             * the FD via ADDFD which we can't revoke, but returning
+             * EMFILE tells the caller dup failed so it won't use it.
+             */
             return kbox_dispatch_errno(EMFILE);
         }
         kbox_fd_table_set_host_fd(ctx->fd_table, new_vfd, new_host);
@@ -1014,9 +1064,7 @@ static struct kbox_dispatch forward_dup(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_value((int64_t) new_vfd);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_dup2                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_dup2. */
 
 static struct kbox_dispatch forward_dup2(const struct kbox_seccomp_notif *notif,
                                          struct kbox_supervisor_ctx *ctx)
@@ -1091,11 +1139,11 @@ static struct kbox_dispatch forward_dup2(const struct kbox_seccomp_notif *notif,
             }
         }
         /*
-         * oldfd is a host FD.  If newfd has a stale LKL redirect
-         * (from a previous dup2), clean it up before the host
-         * kernel overwrites the FD.  Without this, the shell's
-         * dup2(saved_stdout, 1) leaves a stale low_fds entry
-         * that traps all subsequent writes to FD 1 in LKL.
+         * oldfd is a host FD.  If newfd has a stale LKL redirect (from
+         * a previous dup2), clean it up before the host kernel overwrites
+         * the FD.  Without this, the shell's dup2(saved_stdout, 1) leaves
+         * a stale low_fds entry that traps all subsequent writes to FD 1
+         * in LKL.
          */
         long stale = kbox_fd_table_get_lkl(ctx->fd_table, newfd);
         if (stale >= 0) {
@@ -1128,9 +1176,8 @@ static struct kbox_dispatch forward_dup2(const struct kbox_seccomp_notif *notif,
         return kbox_dispatch_value((int64_t) newfd);
 
     /*
-     * Dup first, then close the old mapping.  This preserves the
-     * old newfd if the dup fails (e.g. EMFILE), matching dup2
-     * atomicity semantics.
+     * Dup first, then close the old mapping.  This preserves the old newfd
+     * if the dup fails (e.g. EMFILE), matching dup2 atomicity semantics.
      */
     long ret = kbox_lkl_dup(ctx->sysnrs, lkl_old);
     if (ret < 0)
@@ -1148,9 +1195,7 @@ static struct kbox_dispatch forward_dup2(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_value((int64_t) newfd);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_dup3                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_dup3. */
 
 static struct kbox_dispatch forward_dup3(const struct kbox_seccomp_notif *notif,
                                          struct kbox_supervisor_ctx *ctx)
@@ -1285,9 +1330,7 @@ static struct kbox_dispatch forward_dup3(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_value((int64_t) newfd);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fstat                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_fstat. */
 
 static struct kbox_dispatch forward_fstat(
     const struct kbox_seccomp_notif *notif,
@@ -1320,32 +1363,19 @@ static struct kbox_dispatch forward_fstat(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_newfstatat                                                 */
-/* ------------------------------------------------------------------ */
+/* forward_newfstatat. */
 
 static struct kbox_dispatch forward_newfstatat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     uint64_t remote_stat = notif->data.args[2];
@@ -1368,57 +1398,29 @@ static struct kbox_dispatch forward_newfstatat(
 
     struct stat host_stat;
     kbox_lkl_stat_to_host(&kst, &host_stat);
+    normalize_host_stat_if_needed(ctx, translated, &host_stat);
 
-    /* Normalize permissions if enabled. */
-    if (ctx->normalize) {
-        uint32_t n_mode, n_uid, n_gid;
-        if (kbox_normalized_permissions(translated, &n_mode, &n_uid, &n_gid)) {
-            host_stat.st_mode =
-                (host_stat.st_mode & S_IFMT) | (n_mode & ~S_IFMT);
-            host_stat.st_uid = n_uid;
-            host_stat.st_gid = n_gid;
-        }
-    }
-
-    int wrc = kbox_vm_write(pid, remote_stat, &host_stat, sizeof(host_stat));
+    int wrc =
+        kbox_vm_write(notif->pid, remote_stat, &host_stat, sizeof(host_stat));
     if (wrc < 0)
         return kbox_dispatch_errno(-wrc);
 
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_statx                                                      */
-/* ------------------------------------------------------------------ */
-
-/* statx struct field offsets (standard on x86_64 and aarch64). */
-#define STATX_MODE_OFFSET 0x20
-#define STATX_UID_OFFSET 0x48
-#define STATX_GID_OFFSET 0x4c
-#define STATX_BUF_SIZE 0x100
+/* forward_statx. */
 
 static struct kbox_dispatch forward_statx(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     int flags = (int) to_c_long_arg(notif->data.args[2]);
@@ -1435,50 +1437,29 @@ static struct kbox_dispatch forward_statx(
     if (ret < 0)
         return kbox_dispatch_errno((int) (-ret));
 
-    /* Normalize permissions if enabled. */
-    if (ctx->normalize) {
-        uint32_t n_mode, n_uid, n_gid;
-        if (kbox_normalized_permissions(translated, &n_mode, &n_uid, &n_gid)) {
-            uint16_t mode_le = (uint16_t) n_mode;
-            memcpy(&statx_buf[STATX_MODE_OFFSET], &mode_le, 2);
-            memcpy(&statx_buf[STATX_UID_OFFSET], &n_uid, 4);
-            memcpy(&statx_buf[STATX_GID_OFFSET], &n_gid, 4);
-        }
-    }
+    normalize_statx_if_needed(ctx, translated, statx_buf);
 
-    int wrc = kbox_vm_write(pid, remote_statx, statx_buf, sizeof(statx_buf));
+    int wrc =
+        kbox_vm_write(notif->pid, remote_statx, statx_buf, sizeof(statx_buf));
     if (wrc < 0)
         return kbox_dispatch_errno(-wrc);
 
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_faccessat / forward_faccessat2                             */
-/* ------------------------------------------------------------------ */
+/* forward_faccessat / forward_faccessat2. */
 
 static struct kbox_dispatch do_faccessat(const struct kbox_seccomp_notif *notif,
                                          struct kbox_supervisor_ctx *ctx,
                                          long flags)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long mode = to_c_long_arg(notif->data.args[2]);
@@ -1501,134 +1482,34 @@ static struct kbox_dispatch forward_faccessat2(
     return do_faccessat(notif, ctx, to_c_long_arg(notif->data.args[3]));
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getdents64                                                 */
-/* ------------------------------------------------------------------ */
+/* forward_getdents64. */
 
 static struct kbox_dispatch forward_getdents64(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    long fd = to_c_long_arg(notif->data.args[0]);
-    long lkl_fd = kbox_fd_table_get_lkl(ctx->fd_table, fd);
-
-    if (lkl_fd < 0)
-        return kbox_dispatch_continue();
-
-    uint64_t remote_dirp = notif->data.args[1];
-    int64_t count_raw = to_c_long_arg(notif->data.args[2]);
-    if (count_raw < 0)
-        return kbox_dispatch_errno(EINVAL);
-    size_t count = (size_t) count_raw;
-
-    if (count == 0)
-        return kbox_dispatch_value(0);
-    if (remote_dirp == 0)
-        return kbox_dispatch_errno(EFAULT);
-
-    size_t max_count = 1024 * 1024;
-    if (count > max_count)
-        count = max_count;
-
-    uint8_t *buf = malloc(count);
-    if (!buf)
-        return kbox_dispatch_errno(ENOMEM);
-
-    long ret = kbox_lkl_getdents64(ctx->sysnrs, lkl_fd, buf, (long) count);
-    if (ret < 0) {
-        free(buf);
-        return kbox_dispatch_errno((int) (-ret));
-    }
-
-    size_t n = (size_t) ret;
-    if (n > count) {
-        free(buf);
-        return kbox_dispatch_errno(EIO);
-    }
-
-    pid_t pid = notif->pid;
-    int wrc = kbox_vm_write(pid, remote_dirp, buf, n);
-    free(buf);
-    if (wrc < 0)
-        return kbox_dispatch_errno(-wrc);
-
-    return kbox_dispatch_value((int64_t) n);
+    return forward_getdents_common(notif, ctx, kbox_lkl_getdents64);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getdents (legacy)                                          */
-/* ------------------------------------------------------------------ */
+/* forward_getdents (legacy). */
 
 static struct kbox_dispatch forward_getdents(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    long fd = to_c_long_arg(notif->data.args[0]);
-    long lkl_fd = kbox_fd_table_get_lkl(ctx->fd_table, fd);
-
-    if (lkl_fd < 0)
-        return kbox_dispatch_continue();
-
-    uint64_t remote_dirp = notif->data.args[1];
-    int64_t count_raw = to_c_long_arg(notif->data.args[2]);
-    if (count_raw < 0)
-        return kbox_dispatch_errno(EINVAL);
-    size_t count = (size_t) count_raw;
-
-    if (count == 0)
-        return kbox_dispatch_value(0);
-    if (remote_dirp == 0)
-        return kbox_dispatch_errno(EFAULT);
-
-    size_t max_count = 1024 * 1024;
-    if (count > max_count)
-        count = max_count;
-
-    uint8_t *buf = malloc(count);
-    if (!buf)
-        return kbox_dispatch_errno(ENOMEM);
-
-    long ret = kbox_lkl_getdents(ctx->sysnrs, lkl_fd, buf, (long) count);
-    if (ret < 0) {
-        free(buf);
-        return kbox_dispatch_errno((int) (-ret));
-    }
-
-    size_t n = (size_t) ret;
-    if (n > count) {
-        free(buf);
-        return kbox_dispatch_errno(EIO);
-    }
-
-    pid_t pid = notif->pid;
-    int wrc = kbox_vm_write(pid, remote_dirp, buf, n);
-    free(buf);
-    if (wrc < 0)
-        return kbox_dispatch_errno(-wrc);
-
-    return kbox_dispatch_value((int64_t) n);
+    return forward_getdents_common(notif, ctx, kbox_lkl_getdents);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_chdir                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_chdir. */
 
 static struct kbox_dispatch forward_chdir(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -1639,9 +1520,7 @@ static struct kbox_dispatch forward_chdir(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fchdir                                                     */
-/* ------------------------------------------------------------------ */
+/* forward_fchdir. */
 
 static struct kbox_dispatch forward_fchdir(
     const struct kbox_seccomp_notif *notif,
@@ -1657,9 +1536,7 @@ static struct kbox_dispatch forward_fchdir(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getcwd                                                     */
-/* ------------------------------------------------------------------ */
+/* forward_getcwd. */
 
 static struct kbox_dispatch forward_getcwd(
     const struct kbox_seccomp_notif *notif,
@@ -1694,32 +1571,19 @@ static struct kbox_dispatch forward_getcwd(
     return kbox_dispatch_value((int64_t) n);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_mkdirat                                                    */
-/* ------------------------------------------------------------------ */
+/* forward_mkdirat. */
 
 static struct kbox_dispatch forward_mkdirat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long mode = to_c_long_arg(notif->data.args[2]);
@@ -1727,32 +1591,19 @@ static struct kbox_dispatch forward_mkdirat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_unlinkat                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_unlinkat. */
 
 static struct kbox_dispatch forward_unlinkat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long flags = to_c_long_arg(notif->data.args[2]);
@@ -1760,50 +1611,26 @@ static struct kbox_dispatch forward_unlinkat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_renameat / forward_renameat2                               */
-/* ------------------------------------------------------------------ */
+/* forward_renameat / forward_renameat2. */
 
 static struct kbox_dispatch do_renameat(const struct kbox_seccomp_notif *notif,
                                         struct kbox_supervisor_ctx *ctx,
                                         long flags)
 {
-    pid_t pid = notif->pid;
-    long olddirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char oldpathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc = kbox_vm_read_string(pid, notif->data.args[1], oldpathbuf,
-                             sizeof(oldpathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
-    long newdirfd_raw = to_dirfd_arg(notif->data.args[2]);
-    char newpathbuf[KBOX_MAX_PATH];
-
-    rc = kbox_vm_read_string(pid, notif->data.args[3], newpathbuf,
-                             sizeof(newpathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char oldtrans[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, oldpathbuf, ctx->host_root, oldtrans,
-                                     sizeof(oldtrans));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char newtrans[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, newpathbuf, ctx->host_root, newtrans,
-                                     sizeof(newtrans));
+    long olddirfd, newdirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, oldtrans,
+                                     sizeof(oldtrans), &olddirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long olddirfd = resolve_open_dirfd(oldtrans, olddirfd_raw, ctx->fd_table);
-    if (olddirfd < 0 && olddirfd != AT_FDCWD_LINUX)
+    rc = translate_guest_at_path(notif, ctx, 2, 3, newtrans, sizeof(newtrans),
+                                 &newdirfd);
+    if (rc < 0)
+        return kbox_dispatch_errno(-rc);
+    if (should_continue_for_dirfd(olddirfd))
         return kbox_dispatch_continue();
-
-    long newdirfd = resolve_open_dirfd(newtrans, newdirfd_raw, ctx->fd_table);
-    if (newdirfd < 0 && newdirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(newdirfd))
         return kbox_dispatch_continue();
 
     long ret = kbox_lkl_renameat2(ctx->sysnrs, olddirfd, oldtrans, newdirfd,
@@ -1825,32 +1652,19 @@ static struct kbox_dispatch forward_renameat2(
     return do_renameat(notif, ctx, to_c_long_arg(notif->data.args[4]));
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fchmodat                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_fchmodat. */
 
 static struct kbox_dispatch forward_fchmodat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long mode = to_c_long_arg(notif->data.args[2]);
@@ -1860,32 +1674,19 @@ static struct kbox_dispatch forward_fchmodat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fchownat                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_fchownat. */
 
 static struct kbox_dispatch forward_fchownat(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[1], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    long lkl_dirfd;
+    int rc = translate_guest_at_path(notif, ctx, 0, 1, translated,
+                                     sizeof(translated), &lkl_dirfd);
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    long lkl_dirfd = resolve_open_dirfd(translated, dirfd_raw, ctx->fd_table);
-    if (lkl_dirfd < 0 && lkl_dirfd != AT_FDCWD_LINUX)
+    if (should_continue_for_dirfd(lkl_dirfd))
         return kbox_dispatch_continue();
 
     long owner = to_c_long_arg(notif->data.args[2]);
@@ -1896,9 +1697,7 @@ static struct kbox_dispatch forward_fchownat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_mount                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_mount. */
 
 static struct kbox_dispatch forward_mount(
     const struct kbox_seccomp_notif *notif,
@@ -1948,9 +1747,7 @@ static struct kbox_dispatch forward_mount(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_umount2                                                    */
-/* ------------------------------------------------------------------ */
+/* forward_umount2. */
 
 static struct kbox_dispatch forward_umount2(
     const struct kbox_seccomp_notif *notif,
@@ -1970,27 +1767,17 @@ static struct kbox_dispatch forward_umount2(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* Legacy x86_64 syscall forwarders (stat, lstat, access, etc.)       */
-/* ------------------------------------------------------------------ */
+/* Legacy x86_64 syscall forwarders (stat, lstat, access, etc.). */
 
 static struct kbox_dispatch forward_stat_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx,
     int nofollow)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2009,18 +1796,10 @@ static struct kbox_dispatch forward_stat_legacy(
 
     struct stat host_stat;
     kbox_lkl_stat_to_host(&kst, &host_stat);
+    normalize_host_stat_if_needed(ctx, translated, &host_stat);
 
-    if (ctx->normalize) {
-        uint32_t n_mode, n_uid, n_gid;
-        if (kbox_normalized_permissions(translated, &n_mode, &n_uid, &n_gid)) {
-            host_stat.st_mode =
-                (host_stat.st_mode & S_IFMT) | (n_mode & ~S_IFMT);
-            host_stat.st_uid = n_uid;
-            host_stat.st_gid = n_gid;
-        }
-    }
-
-    int wrc = kbox_vm_write(pid, remote_stat, &host_stat, sizeof(host_stat));
+    int wrc =
+        kbox_vm_write(notif->pid, remote_stat, &host_stat, sizeof(host_stat));
     if (wrc < 0)
         return kbox_dispatch_errno(-wrc);
 
@@ -2031,18 +1810,10 @@ static struct kbox_dispatch forward_access_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2056,18 +1827,10 @@ static struct kbox_dispatch forward_mkdir_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2080,18 +1843,10 @@ static struct kbox_dispatch forward_unlink_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2103,18 +1858,10 @@ static struct kbox_dispatch forward_rmdir_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2127,30 +1874,14 @@ static struct kbox_dispatch forward_rename_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char oldpathbuf[KBOX_MAX_PATH];
-    char newpathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc = kbox_vm_read_string(pid, notif->data.args[0], oldpathbuf,
-                             sizeof(oldpathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
-    rc = kbox_vm_read_string(pid, notif->data.args[1], newpathbuf,
-                             sizeof(newpathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char oldtrans[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, oldpathbuf, ctx->host_root, oldtrans,
-                                     sizeof(oldtrans));
+    char newtrans[KBOX_MAX_PATH];
+    int rc = translate_guest_path(notif->pid, notif->data.args[0],
+                                  ctx->host_root, oldtrans, sizeof(oldtrans));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
-
-    char newtrans[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, newpathbuf, ctx->host_root, newtrans,
-                                     sizeof(newtrans));
+    rc = translate_guest_path(notif->pid, notif->data.args[1], ctx->host_root,
+                              newtrans, sizeof(newtrans));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2163,18 +1894,10 @@ static struct kbox_dispatch forward_chmod_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2188,18 +1911,10 @@ static struct kbox_dispatch forward_chown_legacy(
     const struct kbox_seccomp_notif *notif,
     struct kbox_supervisor_ctx *ctx)
 {
-    pid_t pid = notif->pid;
-    char pathbuf[KBOX_MAX_PATH];
-    int rc;
-
-    rc =
-        kbox_vm_read_string(pid, notif->data.args[0], pathbuf, sizeof(pathbuf));
-    if (rc < 0)
-        return kbox_dispatch_errno(-rc);
-
     char translated[KBOX_MAX_PATH];
-    rc = kbox_translate_path_for_lkl(pid, pathbuf, ctx->host_root, translated,
-                                     sizeof(translated));
+    int rc =
+        translate_guest_path(notif->pid, notif->data.args[0], ctx->host_root,
+                             translated, sizeof(translated));
     if (rc < 0)
         return kbox_dispatch_errno(-rc);
 
@@ -2210,9 +1925,7 @@ static struct kbox_dispatch forward_chown_legacy(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* Identity forwarders: getuid, geteuid, getresuid, etc.              */
-/* ------------------------------------------------------------------ */
+/* Identity forwarders: getuid, geteuid, getresuid, etc. */
 
 static struct kbox_dispatch forward_getresuid(
     const struct kbox_seccomp_notif *notif,
@@ -2401,9 +2114,7 @@ static struct kbox_dispatch forward_getgroups_override(
     return kbox_dispatch_value(1);
 }
 
-/* ------------------------------------------------------------------ */
-/* Identity set forwarders                                            */
-/* ------------------------------------------------------------------ */
+/* Identity set forwarders. */
 
 static struct kbox_dispatch forward_setuid(
     const struct kbox_seccomp_notif *notif,
@@ -2499,31 +2210,27 @@ static struct kbox_dispatch forward_setfsgid(
     return kbox_dispatch_from_lkl(kbox_lkl_setfsgid(ctx->sysnrs, gid));
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_socket                                                     */
-/* ------------------------------------------------------------------ */
+/* forward_socket. */
 
-/*
- * Shadow socket design:
+/* Shadow socket design:
  *   1. Create an LKL socket (lives inside LKL's network stack)
  *   2. Create a host socketpair (sp[0]=supervisor, sp[1]=tracee)
  *   3. Inject sp[1] into the tracee via ADDFD
  *   4. Register sp[0]+lkl_fd with the SLIRP event loop
  *   5. The event loop pumps data between sp[0] and the LKL socket
  *
- * The tracee sees a real host FD, so poll/epoll/read/write all work
- * natively via the host kernel.  Only control-plane ops (connect,
- * getsockopt, etc.) need explicit forwarding.
- */
-/*
- * INET sockets with SLIRP active get a shadow socket bridge so data
- * flows through the host kernel socketpair (bypassing BKL contention
- * in blocking LKL recv/send calls).  Non-INET sockets and INET sockets
- * without SLIRP use the standard virtual FD path.
+ * The tracee sees a real host FD, so poll/epoll/read/write all work natively
+ * via the host kernel. Only control-plane ops (connect, getsockopt, etc.) need
+ * explicit forwarding.
+ *
+ * INET sockets with SLIRP active get a shadow socket bridge so data flows
+ * through the host kernel socketpair (bypassing BKL contention in blocking LKL
+ * recv/send calls). Non-INET sockets and INET sockets without SLIRP use the
+ * standard virtual FD path.
  *
  * Limitation: listen/accept on shadow sockets fail because the AF_UNIX
- * socketpair doesn't support inbound connections.  Server sockets must
- * be used without --net or via a future deferred-bridge approach.
+ * socketpair doesn't support inbound connections. Server sockets must be used
+ * without --net or via a future deferred-bridge approach.
  */
 static struct kbox_dispatch forward_socket(
     const struct kbox_seccomp_notif *notif,
@@ -2544,8 +2251,9 @@ static struct kbox_dispatch forward_socket(
     /* Virtual FD path when shadow bridge is not applicable:
      * - SLIRP not active (no --net)
      * - Non-INET domain (AF_UNIX, AF_NETLINK, etc.)
-     * - Non-stream/datagram type (SOCK_RAW, etc.) -- socketpair(AF_UNIX)
-     *   only supports SOCK_STREAM and SOCK_DGRAM */
+     * - Non-stream/datagram type (SOCK_RAW, etc.): socketpair(AF_UNIX)
+     *   only supports SOCK_STREAM and SOCK_DGRAM
+     */
     if (!kbox_net_is_active() ||
         (domain != 2 /* AF_INET */ && domain != 10 /* AF_INET6 */) ||
         (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)) {
@@ -2613,9 +2321,7 @@ static struct kbox_dispatch forward_socket(
     return kbox_dispatch_value((int64_t) host_fd);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_bind / forward_connect                                     */
-/* ------------------------------------------------------------------ */
+/* forward_bind / forward_connect. */
 
 static long resolve_lkl_socket(struct kbox_supervisor_ctx *ctx, long fd);
 
@@ -2650,14 +2356,11 @@ static struct kbox_dispatch forward_bind(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_connect                                                    */
-/* ------------------------------------------------------------------ */
+/* forward_connect. */
 
-/*
- * Resolve LKL FD from a tracee FD.  The tracee may hold either a
- * virtual FD (>= KBOX_FD_BASE) or a host FD from a shadow socket
- * (injected via ADDFD).  Try both paths.
+/* Resolve LKL FD from a tracee FD.  The tracee may hold either a virtual FD
+ * (>= KBOX_FD_BASE) or a host FD from a shadow socket (injected via ADDFD).
+ * Try both paths.
  */
 static long resolve_lkl_socket(struct kbox_supervisor_ctx *ctx, long fd)
 {
@@ -2703,20 +2406,16 @@ static struct kbox_dispatch forward_connect(
 
     long ret = kbox_lkl_connect(ctx->sysnrs, lkl_fd, buf, (long) len);
 
-    /*
-     * Propagate -EINPROGRESS directly for nonblocking sockets.
-     * The tracee's poll(POLLOUT) on the AF_UNIX socketpair returns
-     * immediately (spurious wakeup), but getsockopt(SO_ERROR) is
-     * forwarded to the LKL socket and returns the real handshake
-     * status.  The tracee retries poll+getsockopt until SO_ERROR
-     * clears -- standard nonblocking connect flow.
+    /* Propagate -EINPROGRESS directly for nonblocking sockets. The tracee's
+     * poll(POLLOUT) on the AF_UNIX socketpair returns immediately (spurious
+     * wakeup), but getsockopt(SO_ERROR) is forwarded to the LKL socket and
+     * returns the real handshake status. The tracee retries poll+getsockopt
+     * until SO_ERROR clears; standard nonblocking connect flow.
      */
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getsockopt                                                 */
-/* ------------------------------------------------------------------ */
+/* forward_getsockopt. */
 
 static struct kbox_dispatch forward_getsockopt(
     const struct kbox_seccomp_notif *notif,
@@ -2765,9 +2464,7 @@ static struct kbox_dispatch forward_getsockopt(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_setsockopt                                                 */
-/* ------------------------------------------------------------------ */
+/* forward_setsockopt. */
 
 static struct kbox_dispatch forward_setsockopt(
     const struct kbox_seccomp_notif *notif,
@@ -2799,9 +2496,7 @@ static struct kbox_dispatch forward_setsockopt(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getsockname / forward_getpeername                          */
-/* ------------------------------------------------------------------ */
+/* forward_getsockname / forward_getpeername. */
 
 typedef long (*sockaddr_query_fn)(const struct kbox_sysnrs *s,
                                   long fd,
@@ -2865,9 +2560,7 @@ static struct kbox_dispatch forward_getpeername(
     return forward_sockaddr_query(notif, ctx, kbox_lkl_getpeername);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_shutdown                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_shutdown. */
 
 static struct kbox_dispatch forward_shutdown(
     const struct kbox_seccomp_notif *notif,
@@ -2883,15 +2576,11 @@ static struct kbox_dispatch forward_shutdown(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_sendto / forward_recvfrom / forward_sendmsg / forward_recvmsg */
-/* ------------------------------------------------------------------ */
+/* forward_sendto / forward_recvfrom / forward_recvmsg. */
 
-/*
- * forward_sendto: for shadow sockets with a destination address,
- * forward the data + address directly to the LKL socket.
- * This is needed for unconnected UDP (DNS resolver uses sendto
- * with sockaddr_in without prior connect).
+/* forward_sendto: for shadow sockets with a destination address, forward the
+ * data + address directly to the LKL socket. This is needed for unconnected
+ * UDP (DNS resolver uses sendto with sockaddr_in without prior connect).
  *
  * sendto(fd, buf, len, flags, dest_addr, addrlen)
  *   args[0]=fd, args[1]=buf, args[2]=len, args[3]=flags,
@@ -2943,8 +2632,8 @@ static struct kbox_dispatch forward_sendto(
 }
 
 /*
- * forward_recvfrom: for shadow sockets, receive data + source address
- * from the LKL socket and write them back to the tracee.
+ * forward_recvfrom: for shadow sockets, receive data + source address from
+ * the LKL socket and write them back to the tracee.
  *
  * recvfrom(fd, buf, len, flags, src_addr, addrlen)
  *   args[0]=fd, args[1]=buf, args[2]=len, args[3]=flags,
@@ -3014,102 +2703,8 @@ static struct kbox_dispatch forward_recvfrom(
 }
 
 /*
- * forward_sendmsg: intercept for shadow sockets so that msg_name
- * (destination address) reaches the LKL socket.  For non-shadow
- * sockets or connected stream sockets without msg_name, CONTINUE
- * lets the host kernel handle the AF_UNIX socketpair write.
- *
- * sendmsg(fd, msg, flags)
- *   args[0]=fd, args[1]=msg_ptr, args[2]=flags
- *
- * struct msghdr { void *msg_name; socklen_t msg_namelen;
- *   struct iovec *msg_iov; size_t msg_iovlen; ... }
- */
-/* Unreachable: sendmsg is BPF allow-listed for SCM_RIGHTS.
- * Kept for documentation; will be wired when FD transfer is refactored. */
-__attribute__((unused)) static struct kbox_dispatch forward_sendmsg(
-    const struct kbox_seccomp_notif *notif,
-    struct kbox_supervisor_ctx *ctx)
-{
-    long fd = to_c_long_arg(notif->data.args[0]);
-    long lkl_fd = resolve_lkl_socket(ctx, fd);
-    if (lkl_fd < 0)
-        return kbox_dispatch_continue();
-
-    pid_t pid = notif->pid;
-    uint64_t msg_ptr = notif->data.args[1];
-    long flags = to_c_long_arg(notif->data.args[2]);
-
-    if (msg_ptr == 0)
-        return kbox_dispatch_errno(EFAULT);
-
-    /* Read the msghdr from the tracee. */
-    struct {
-        uint64_t msg_name;
-        uint32_t msg_namelen;
-        uint32_t __pad0;
-        uint64_t msg_iov;
-        uint64_t msg_iovlen;
-        uint64_t msg_control;
-        uint64_t msg_controllen;
-        int msg_flags;
-    } mh;
-    int rrc = kbox_vm_read(pid, msg_ptr, &mh, sizeof(mh));
-    if (rrc < 0)
-        return kbox_dispatch_errno(-rrc);
-
-    /* No destination address: stream data path via CONTINUE. */
-    if (mh.msg_name == 0 || mh.msg_namelen == 0)
-        return kbox_dispatch_continue();
-
-    /* Has destination address: read iov data and address, forward to LKL. */
-    uint8_t addr[128];
-    if (mh.msg_namelen > sizeof(addr))
-        return kbox_dispatch_errno(EINVAL);
-    rrc = kbox_vm_read(pid, mh.msg_name, addr, mh.msg_namelen);
-    if (rrc < 0)
-        return kbox_dispatch_errno(-rrc);
-
-    /* Gather all iovec data into a contiguous buffer. */
-    if (mh.msg_iovlen == 0)
-        return kbox_dispatch_value(0);
-
-    uint8_t buf[65536];
-    size_t total = 0;
-    size_t niov = (size_t) mh.msg_iovlen;
-    if (niov > 64)
-        niov = 64;
-
-    struct {
-        uint64_t iov_base;
-        uint64_t iov_len;
-    } iovs[64];
-    size_t iov_bytes = niov * sizeof(iovs[0]);
-    rrc = kbox_vm_read(pid, mh.msg_iov, iovs, iov_bytes);
-    if (rrc < 0)
-        return kbox_dispatch_errno(-rrc);
-
-    for (size_t v = 0; v < niov && total < sizeof(buf); v++) {
-        size_t chunk = (size_t) iovs[v].iov_len;
-        if (total + chunk > sizeof(buf))
-            chunk = sizeof(buf) - total;
-        if (chunk > 0 && iovs[v].iov_base != 0) {
-            rrc = kbox_vm_read(pid, iovs[v].iov_base, buf + total, chunk);
-            if (rrc < 0)
-                return kbox_dispatch_errno(-rrc);
-            total += chunk;
-        }
-    }
-
-    long ret = kbox_lkl_sendto(ctx->sysnrs, lkl_fd, buf, (long) total, flags,
-                               addr, (long) mh.msg_namelen);
-    return kbox_dispatch_from_lkl(ret);
-}
-
-/*
- * forward_recvmsg: intercept for shadow sockets so that msg_name
- * (source address) is populated from the LKL socket, not the
- * AF_UNIX socketpair.
+ * forward_recvmsg: intercept for shadow sockets so that msg_name (source
+ * address) is populated from the LKL socket, not the AF_UNIX socketpair.
  *
  * recvmsg(fd, msg, flags)
  *   args[0]=fd, args[1]=msg_ptr, args[2]=flags
@@ -3215,9 +2810,7 @@ static struct kbox_dispatch forward_recvmsg(
     return kbox_dispatch_value(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_clock_gettime                                              */
-/* ------------------------------------------------------------------ */
+/* forward_clock_gettime. */
 
 static struct kbox_dispatch forward_clock_gettime(
     const struct kbox_seccomp_notif *notif,
@@ -3241,9 +2834,7 @@ static struct kbox_dispatch forward_clock_gettime(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_clock_getres                                               */
-/* ------------------------------------------------------------------ */
+/* forward_clock_getres. */
 
 static struct kbox_dispatch forward_clock_getres(
     const struct kbox_seccomp_notif *notif,
@@ -3266,9 +2857,7 @@ static struct kbox_dispatch forward_clock_getres(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_gettimeofday                                               */
-/* ------------------------------------------------------------------ */
+/* forward_gettimeofday. */
 
 static struct kbox_dispatch forward_gettimeofday(
     const struct kbox_seccomp_notif *notif,
@@ -3279,8 +2868,8 @@ static struct kbox_dispatch forward_gettimeofday(
     uint64_t remote_tz = notif->data.args[1];
 
     /*
-     * Use clock_gettime(CLOCK_REALTIME) as the underlying source,
-     * which works on both x86_64 and aarch64.
+     * Use clock_gettime(CLOCK_REALTIME) as the underlying source, which
+     * works on both x86_64 and aarch64.
      */
     if (remote_tv != 0) {
         struct timespec ts;
@@ -3314,9 +2903,7 @@ static struct kbox_dispatch forward_gettimeofday(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_readlinkat                                                  */
-/* ------------------------------------------------------------------ */
+/* forward_readlinkat. */
 
 static struct kbox_dispatch forward_readlinkat(
     const struct kbox_seccomp_notif *notif,
@@ -3368,9 +2955,7 @@ static struct kbox_dispatch forward_readlinkat(
     return kbox_dispatch_value((int64_t) n);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_pipe2                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_pipe2. */
 
 static struct kbox_dispatch forward_pipe2(
     const struct kbox_seccomp_notif *notif,
@@ -3384,12 +2969,12 @@ static struct kbox_dispatch forward_pipe2(
         return kbox_dispatch_errno(EFAULT);
 
     /*
-     * Create a real host pipe and inject both ends into the tracee
-     * via SECCOMP_IOCTL_NOTIF_ADDFD.  This makes pipes fully native:
+     * Create a real host pipe and inject both ends into the tracee via
+     * SECCOMP_IOCTL_NOTIF_ADDFD.  This makes pipes fully native:
      *
-     *   - dup2/close/read/write on pipe FDs → CONTINUE (host kernel)
-     *   - Proper fork semantics: both parent and child share the
-     *     real pipe, no virtual FD table conflicts.
+     *   - dup2/close/read/write on pipe FDs -> CONTINUE (host kernel)
+     *   - Proper fork semantics: both parent and child share the real
+     *     pipe, no virtual FD table conflicts.
      *   - No LKL overhead for IPC data transfer.
      */
     int host_pipefd[2];
@@ -3426,9 +3011,7 @@ static struct kbox_dispatch forward_pipe2(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_uname                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_uname. */
 
 static struct kbox_dispatch forward_uname(
     const struct kbox_seccomp_notif *notif,
@@ -3461,9 +3044,7 @@ static struct kbox_dispatch forward_uname(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_getrandom                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_getrandom. */
 
 static struct kbox_dispatch forward_getrandom(
     const struct kbox_seccomp_notif *notif,
@@ -3483,8 +3064,8 @@ static struct kbox_dispatch forward_getrandom(
         return kbox_dispatch_value(0);
 
     /*
-     * Read from /dev/urandom via LKL.  Fall back to host if LKL
-     * does not have the device available.
+     * Read from /dev/urandom via LKL.  Fall back to host if LKL does not
+     * have the device available.
      */
     size_t max_chunk = 256;
     if (buflen > max_chunk)
@@ -3512,18 +3093,16 @@ static struct kbox_dispatch forward_getrandom(
     return kbox_dispatch_value((int64_t) n);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_syslog (klogctl)                                            */
-/* ------------------------------------------------------------------ */
+/* forward_syslog (klogctl). */
 
 /*
- * syslog(type, buf, len) -- forward to LKL so dmesg shows the LKL
- * kernel's ring buffer, not the host's.
+ * syslog(type, buf, len): forward to LKL so dmesg shows the LKL kernel's
+ * ring buffer, not the host's.
  *
- * Types that read into buf (2=READ, 3=READ_ALL, 4=READ_CLEAR):
- *   call LKL with a scratch buffer, then copy to tracee.
- * Types that just return a value (0,1,5-10):
- *   forward type+len, return the result directly.
+ * Types that read into buf (2=READ, 3=READ_ALL, 4=READ_CLEAR): call LKL
+ * with a scratch buffer, then copy to tracee.
+ * Types that just return a value (0,1,5-10): forward type+len, return the
+ * result directly.
  */
 #define SYSLOG_ACTION_READ 2
 #define SYSLOG_ACTION_READ_ALL 3
@@ -3555,11 +3134,11 @@ static struct kbox_dispatch forward_syslog(
         return kbox_dispatch_errno(EFAULT);
 
     /*
-     * Static buffer -- safe because the supervisor is single-threaded.
+     * Static buffer; safe because the supervisor is single-threaded.
      * Clamp to the actual LKL ring buffer size so READ_CLEAR never
-     * discards data beyond what we can copy out.  The ring buffer size
-     * is fixed at boot, so cache it after the first query.
-     * Hard-cap at 1MB (the static buffer size) as a safety ceiling.
+     * discards data beyond what we can copy out.  The ring buffer size is
+     * fixed at boot, so cache it after the first query.  Hard-cap at 1MB
+     * (the static buffer size) as a safety ceiling.
      */
     static uint8_t scratch[1024 * 1024];
     static long cached_ring_sz;
@@ -3587,9 +3166,7 @@ static struct kbox_dispatch forward_syslog(
     return kbox_dispatch_value((int64_t) n);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_prctl                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_prctl. */
 
 #ifndef PR_SET_NAME
 #define PR_SET_NAME 15
@@ -3611,12 +3188,11 @@ static struct kbox_dispatch forward_prctl(
     long option = to_c_long_arg(notif->data.args[0]);
 
     /*
-     * Block PR_SET_DUMPABLE(0): clearing dumpability makes
-     * process_vm_readv fail, which would bypass clone3
-     * namespace-flag sanitization (the supervisor can't read
-     * clone_args.flags from a non-dumpable process).
-     * Return success without actually clearing -- the tracee
-     * thinks it worked, but the supervisor retains read access.
+     * Block PR_SET_DUMPABLE(0): clearing dumpability makes process_vm_readv
+     * fail, which would bypass clone3 namespace-flag sanitization (the
+     * supervisor can't read clone_args.flags from a non-dumpable process).
+     * Return success without actually clearing; the tracee thinks it
+     * worked, but the supervisor retains read access.
      */
     if (option == PR_SET_DUMPABLE && to_c_long_arg(notif->data.args[1]) == 0)
         return kbox_dispatch_value(0);
@@ -3625,8 +3201,8 @@ static struct kbox_dispatch forward_prctl(
         return kbox_dispatch_value(1);
 
     /*
-     * Only forward PR_SET_NAME and PR_GET_NAME to LKL.
-     * Everything else passes through to the host kernel.
+     * Only forward PR_SET_NAME and PR_GET_NAME to LKL.  Everything else
+     * passes through to the host kernel.
      *
      * PR_SET_NAME/PR_GET_NAME use a 16-byte name buffer.  The tracee
      * passes a pointer in arg2 which is in the tracee's address space,
@@ -3664,9 +3240,7 @@ static struct kbox_dispatch forward_prctl(
     return kbox_dispatch_value(0);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_umask                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_umask. */
 
 static struct kbox_dispatch forward_umask(
     const struct kbox_seccomp_notif *notif,
@@ -3677,9 +3251,7 @@ static struct kbox_dispatch forward_umask(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_pwrite64                                                    */
-/* ------------------------------------------------------------------ */
+/* forward_pwrite64. */
 
 static struct kbox_dispatch forward_pwrite64(
     const struct kbox_seccomp_notif *notif,
@@ -3746,12 +3318,9 @@ static struct kbox_dispatch forward_pwrite64(
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_writev                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_writev. */
 
-/*
- * iovec layout matches the kernel's: { void *iov_base; size_t iov_len; }
+/* iovec layout matches the kernel's: { void *iov_base; size_t iov_len; }
  * On 64-bit: 16 bytes per entry.
  */
 #define IOV_ENTRY_SIZE 16
@@ -3844,9 +3413,7 @@ done:
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_readv                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_readv. */
 
 static struct kbox_dispatch forward_readv(
     const struct kbox_seccomp_notif *notif,
@@ -3936,9 +3503,7 @@ done_readv:
     return kbox_dispatch_value((int64_t) total);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_ftruncate                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_ftruncate. */
 
 static struct kbox_dispatch forward_ftruncate(
     const struct kbox_seccomp_notif *notif,
@@ -3955,9 +3520,7 @@ static struct kbox_dispatch forward_ftruncate(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fallocate                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_fallocate. */
 
 static struct kbox_dispatch forward_fallocate(
     const struct kbox_seccomp_notif *notif,
@@ -3978,9 +3541,7 @@ static struct kbox_dispatch forward_fallocate(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_flock                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_flock. */
 
 static struct kbox_dispatch forward_flock(
     const struct kbox_seccomp_notif *notif,
@@ -3997,9 +3558,7 @@ static struct kbox_dispatch forward_flock(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fsync                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_fsync. */
 
 static struct kbox_dispatch forward_fsync(
     const struct kbox_seccomp_notif *notif,
@@ -4015,9 +3574,7 @@ static struct kbox_dispatch forward_fsync(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_fdatasync                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_fdatasync. */
 
 static struct kbox_dispatch forward_fdatasync(
     const struct kbox_seccomp_notif *notif,
@@ -4033,9 +3590,7 @@ static struct kbox_dispatch forward_fdatasync(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_sync                                                        */
-/* ------------------------------------------------------------------ */
+/* forward_sync. */
 
 static struct kbox_dispatch forward_sync(const struct kbox_seccomp_notif *notif,
                                          struct kbox_supervisor_ctx *ctx)
@@ -4045,9 +3600,7 @@ static struct kbox_dispatch forward_sync(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_symlinkat                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_symlinkat. */
 
 static struct kbox_dispatch forward_symlinkat(
     const struct kbox_seccomp_notif *notif,
@@ -4085,9 +3638,7 @@ static struct kbox_dispatch forward_symlinkat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_linkat                                                      */
-/* ------------------------------------------------------------------ */
+/* forward_linkat. */
 
 static struct kbox_dispatch forward_linkat(
     const struct kbox_seccomp_notif *notif,
@@ -4138,9 +3689,7 @@ static struct kbox_dispatch forward_linkat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_utimensat                                                   */
-/* ------------------------------------------------------------------ */
+/* forward_utimensat. */
 
 /* struct timespec is 16 bytes on 64-bit: tv_sec(8) + tv_nsec(8). */
 #define TIMESPEC_SIZE 16
@@ -4153,8 +3702,8 @@ static struct kbox_dispatch forward_utimensat(
     long dirfd_raw = to_dirfd_arg(notif->data.args[0]);
 
     /*
-     * pathname can be NULL for utimensat (operates on dirfd itself).
-     * In that case args[1] == 0.
+     * pathname can be NULL for utimensat (operates on dirfd itself).  In
+     * that case args[1] == 0.
      */
     char pathbuf[KBOX_MAX_PATH];
     const char *translated_path = NULL;
@@ -4202,9 +3751,7 @@ static struct kbox_dispatch forward_utimensat(
     return kbox_dispatch_from_lkl(ret);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_ioctl                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_ioctl. */
 
 /* Terminal ioctl constants. */
 #ifndef TCGETS
@@ -4239,12 +3786,11 @@ static struct kbox_dispatch forward_ioctl(
 
     if (lkl_fd < 0) {
         /*
-         * Host FD (stdin/stdout/stderr or pipe).  Most ioctls pass
-         * through to the host kernel.  However, job-control ioctls
-         * (TIOCSPGRP/TIOCGPGRP) fail with EPERM under seccomp-unotify
-         * because the supervised child is not the session leader.
-         * Return ENOTTY so shells fall back to non-job-control mode
-         * instead of aborting.
+         * Host FD (stdin/stdout/stderr or pipe).  Most ioctls pass through
+         * to the host kernel.  However, job-control ioctls (TIOCSPGRP/
+         * TIOCGPGRP) fail with EPERM under seccomp-unotify because the
+         * supervised child is not the session leader.  Return ENOTTY so
+         * shells fall back to non-job-control mode instead of aborting.
          */
         if (cmd == TIOCSPGRP || cmd == TIOCGPGRP || cmd == TIOCSCTTY)
             return kbox_dispatch_errno(ENOTTY);
@@ -4254,29 +3800,27 @@ static struct kbox_dispatch forward_ioctl(
     (void) lkl_fd;
 
     /*
-     * For virtual FDs backed by LKL, terminal ioctls return ENOTTY
-     * since LKL file-backed FDs are not terminals.  Non-terminal
-     * ioctls also return ENOTTY, matching regular-file semantics.
+     * For virtual FDs backed by LKL, terminal ioctls return ENOTTY since
+     * LKL file-backed FDs are not terminals.  Non-terminal ioctls also
+     * return ENOTTY, matching regular-file semantics.
      */
     return kbox_dispatch_errno(ENOTTY);
 }
 
-/* ------------------------------------------------------------------ */
-/* forward_mmap                                                       */
-/* ------------------------------------------------------------------ */
+/* forward_mmap. */
 
 /*
- * mmap dispatch: the only case we intercept is a virtual FD with no
- * host shadow.  Everything else (MAP_ANONYMOUS, shadow FDs, host FDs)
- * passes through to the host kernel via CONTINUE.
+ * mmap dispatch: the only case we intercept is a virtual FD with no host
+ * shadow.  Everything else (MAP_ANONYMOUS, shadow FDs, host FDs) passes
+ * through to the host kernel via CONTINUE.
  */
 static struct kbox_dispatch forward_mmap(const struct kbox_seccomp_notif *notif,
                                          struct kbox_supervisor_ctx *ctx)
 {
     /*
-     * mmap fd is a 32-bit int.  In seccomp_data.args[] it is
-     * zero-extended to uint64_t, so -1 appears as 0xffffffff.
-     * Use to_dirfd_arg to properly sign-extend from 32 bits.
+     * mmap fd is a 32-bit int.  In seccomp_data.args[] it is zero-extended
+     * to uint64_t, so -1 appears as 0xffffffff.  Use to_dirfd_arg to
+     * properly sign-extend from 32 bits.
      */
     long fd = to_dirfd_arg(notif->data.args[4]);
 
@@ -4285,10 +3829,10 @@ static struct kbox_dispatch forward_mmap(const struct kbox_seccomp_notif *notif,
         return kbox_dispatch_continue();
 
     /*
-     * If fd is a virtual FD (tracked in our table) and has no host
-     * shadow, the host kernel cannot resolve it.  Return ENODEV.
-     * This covers both high-range (>= KBOX_FD_BASE) and low-range
-     * (dup2 redirects) virtual FDs.
+     * If fd is a virtual FD (tracked in our table) and has no host shadow,
+     * the host kernel cannot resolve it.  Return ENODEV.  This covers both
+     * high-range (>= KBOX_FD_BASE) and low-range (dup2 redirects) virtual
+     * FDs.
      */
     if (kbox_fd_table_get_lkl(ctx->fd_table, fd) >= 0) {
         long host = kbox_fd_table_get_host_fd(ctx->fd_table, fd);
@@ -4300,21 +3844,20 @@ static struct kbox_dispatch forward_mmap(const struct kbox_seccomp_notif *notif,
     return kbox_dispatch_continue();
 }
 
-/* ------------------------------------------------------------------ */
 /* Identity dispatch helpers                                          */
 /*                                                                    */
 /* In host+root_identity mode, get* returns 0 and set* returns 0.     */
 /* In host+override mode, get* returns the override value.            */
 /* In host+neither mode, CONTINUE to host kernel.                     */
 /* In image mode, forward to LKL.                                     */
-/* ------------------------------------------------------------------ */
 
 /*
- * Macro to reduce repetition in the identity dispatch.  For a given
- * identity syscall, check the mode and route accordingly.
+ * Macro to reduce repetition in the identity dispatch.  For a given identity
+ * syscall, check the mode and route accordingly.
  *
- * GET_ID: host+root -> override(0), host+!root+override -> override(uid/gid),
- *         host+!root+!override -> CONTINUE, image -> forward to LKL.
+ * GET_ID: host+root -> override(0), host+!root+override ->
+ *         override(uid/gid), host+!root+!override -> CONTINUE,
+ *         image -> forward to LKL.
  */
 #define DISPATCH_GET_UID(notif, ctx, override_val, lkl_func)          \
     do {                                                              \
@@ -4350,35 +3893,32 @@ static struct kbox_dispatch forward_mmap(const struct kbox_seccomp_notif *notif,
         return lkl_forward(notif, ctx);          \
     } while (0)
 
-/* ------------------------------------------------------------------ */
-/* forward_execve                                                     */
-/* ------------------------------------------------------------------ */
+/* forward_execve. */
 
-/*
- * AT_EMPTY_PATH flag for execveat -- indicates fexecve() usage.
- * Defined here to avoid pulling in the full linux/fcntl.h.
+/* AT_EMPTY_PATH flag for execveat: indicates fexecve() usage.  Defined
+ * here to avoid pulling in the full linux/fcntl.h.
  */
 #define KBOX_AT_EMPTY_PATH 0x1000
 
 /*
  * Handle execve/execveat from inside the image.
  *
- * For fexecve (execveat with AT_EMPTY_PATH on a host memfd):
- *   CONTINUE -- the host kernel handles it directly.  This is the
- *   initial exec path from image.c.
+ * For fexecve (execveat with AT_EMPTY_PATH on a host memfd): CONTINUE,
+ * the host kernel handles it directly.  This is the initial exec path
+ * from image.c.
  *
  * For in-image exec (e.g. shell runs /bin/ls):
  *   1. Read the pathname from tracee memory
  *   2. Open the binary from LKL, create a memfd
- *   3. Check for PT_INTERP; if dynamic, extract interpreter into
- *      a second memfd and patch PT_INTERP to /proc/self/fd/N
+ *   3. Check for PT_INTERP; if dynamic, extract interpreter into a second
+ *      memfd and patch PT_INTERP to /proc/self/fd/N
  *   4. Inject memfds into the tracee via ADDFD
  *   5. Overwrite the pathname in tracee memory with /proc/self/fd/N
- *   6. CONTINUE -- kernel re-reads the rewritten path and execs
+ *   6. CONTINUE: kernel re-reads the rewritten path and execs
  *
- * The seccomp-unotify guarantees the tracee is blocked during steps
- * 1-5, and the kernel has not yet copied the pathname (getname
- * happens after the seccomp check), so the overwrite is race-free.
+ * The seccomp-unotify guarantees the tracee is blocked during steps 1-5,
+ * and the kernel has not yet copied the pathname (getname happens after
+ * the seccomp check), so the overwrite is race-free.
  */
 static struct kbox_dispatch forward_execve(
     const struct kbox_seccomp_notif *notif,
@@ -4388,9 +3928,9 @@ static struct kbox_dispatch forward_execve(
     pid_t pid = notif->pid;
 
     /*
-     * Detect fexecve: execveat(fd, "", argv, envp, AT_EMPTY_PATH).
-     * This is the initial exec from image.c on the host memfd.
-     * Let the kernel handle it directly.
+     * Detect fexecve: execveat(fd, "", argv, envp, AT_EMPTY_PATH).  This
+     * is the initial exec from image.c on the host memfd.  Let the kernel
+     * handle it directly.
      */
     if (is_execveat) {
         long flags = to_c_long_arg(notif->data.args[4]);
@@ -4431,9 +3971,8 @@ static struct kbox_dispatch forward_execve(
         return kbox_dispatch_errno(-exec_memfd);
 
     /*
-     * Check for PT_INTERP (dynamic binary).
-     * Read the first 4 KB -- enough for any reasonable ELF header
-     * plus the full program header table.
+     * Check for PT_INTERP (dynamic binary).  Read the first 4 KB; enough
+     * for any reasonable ELF header plus the full program header table.
      */
     {
         unsigned char elf_buf[4096];
@@ -4447,9 +3986,8 @@ static struct kbox_dispatch forward_execve(
                 &pt_offset, &pt_filesz);
 
             if (ilen > 0) {
-                /*
-                 * Dynamic binary.  Extract the interpreter from LKL
-                 * and inject it into the tracee.
+                /* Dynamic binary.  Extract the interpreter from LKL and
+                 * inject it into the tracee.
                  */
                 long interp_lkl = kbox_lkl_openat(ctx->sysnrs, AT_FDCWD_LINUX,
                                                   interp_path, O_RDONLY, 0);
@@ -4473,11 +4011,11 @@ static struct kbox_dispatch forward_execve(
                 }
 
                 /*
-                 * Inject the interpreter memfd first so we know
-                 * its FD number in the tracee for the PT_INTERP
-                 * patch.  O_CLOEXEC is safe: the kernel resolves
-                 * /proc/self/fd/N via open_exec() before
-                 * begin_new_exec() closes CLOEXEC descriptors.
+                 * Inject the interpreter memfd first so we know its FD
+                 * number in the tracee for the PT_INTERP patch.  O_CLOEXEC
+                 * is safe: the kernel resolves /proc/self/fd/N via
+                 * open_exec() before begin_new_exec() closes CLOEXEC
+                 * descriptors.
                  */
                 int tracee_interp_fd = kbox_notify_addfd(
                     ctx->listener_fd, notif->id, interp_memfd, O_CLOEXEC);
@@ -4488,9 +4026,8 @@ static struct kbox_dispatch forward_execve(
                     return kbox_dispatch_errno(-tracee_interp_fd);
                 }
 
-                /*
-                 * Patch PT_INTERP in the exec memfd to point at
-                 * the injected interpreter: /proc/self/fd/<N>.
+                /* Patch PT_INTERP in the exec memfd to point at the
+                 * injected interpreter: /proc/self/fd/<N>.
                  */
                 char new_interp[64];
                 int new_len = snprintf(new_interp, sizeof(new_interp),
@@ -4524,8 +4061,8 @@ static struct kbox_dispatch forward_execve(
     }
 
     /*
-     * Inject the exec memfd into the tracee.  O_CLOEXEC keeps the
-     * tracee's FD table clean after exec succeeds.
+     * Inject the exec memfd into the tracee.  O_CLOEXEC keeps the tracee's
+     * FD table clean after exec succeeds.
      */
     int tracee_exec_fd =
         kbox_notify_addfd(ctx->listener_fd, notif->id, exec_memfd, O_CLOEXEC);
@@ -4535,28 +4072,27 @@ static struct kbox_dispatch forward_execve(
         return kbox_dispatch_errno(-tracee_exec_fd);
 
     /*
-     * Overwrite the pathname in the tracee's memory with
-     * /proc/self/fd/<N>.  The kernel has not yet copied the
-     * pathname (getname happens after the seccomp check), so
-     * when we CONTINUE, it reads our rewritten path.
+     * Overwrite the pathname in the tracee's memory with /proc/self/fd/<N>.
+     * The kernel has not yet copied the pathname (getname happens after
+     * the seccomp check), so when we CONTINUE, it reads our rewritten
+     * path.
      *
-     * argv[0] aliasing: some shells pass the same pointer for
-     * pathname and argv[0].  If we overwrite the pathname, we
-     * corrupt argv[0].  Detect this and fix it by writing the
-     * original path right after the new path in the same buffer,
-     * then updating the argv[0] pointer in the argv array.
+     * argv[0] aliasing: some shells pass the same pointer for pathname
+     * and argv[0].  If we overwrite the pathname, we corrupt argv[0].
+     * Detect this and fix it by writing the original path right after
+     * the new path in the same buffer, then updating the argv[0] pointer
+     * in the argv array.
      *
-     * Try process_vm_writev first (fast path).  If that fails
-     * (e.g. pathname is in .rodata), fall back to /proc/pid/mem
-     * which can write through page protections.
+     * Try process_vm_writev first (fast path).  If that fails (e.g.
+     * pathname is in .rodata), fall back to /proc/pid/mem which can
+     * write through page protections.
      */
     char new_path[64];
     int new_path_len = snprintf(new_path, sizeof(new_path), "/proc/self/fd/%d",
                                 tracee_exec_fd);
 
-    /*
-     * Check if argv[0] is aliased with the pathname.
-     * argv pointer is args[1] for execve, args[2] for execveat.
+    /* Check if argv[0] is aliased with the pathname. argv pointer is args[1]
+     * for execve, args[2] for execveat.
      */
     uint64_t argv_addr =
         is_execveat ? notif->data.args[2] : notif->data.args[1];
@@ -4569,10 +4105,8 @@ static struct kbox_dispatch forward_execve(
             argv0_aliased = 1;
     }
 
-    /*
-     * Build the write buffer: new_path + NUL + original_path + NUL.
-     * The original path goes right after the new path so we can
-     * point argv[0] at it.
+    /* Build the write buffer: new_path + NUL + original_path + NUL. Original
+     * path goes right after the new path so we can point argv[0] at it.
      */
     size_t orig_len = strlen(pathbuf);
     size_t total_write = (size_t) (new_path_len + 1);
@@ -4601,9 +4135,8 @@ static struct kbox_dispatch forward_execve(
         }
     }
 
-    /*
-     * If argv[0] was aliased, update the argv[0] pointer to
-     * point at the original path copy (right after the new path).
+    /* If argv[0] was aliased, update the argv[0] pointer to point at original
+     * path copy (right after the new path).
      */
     if (argv0_aliased) {
         uint64_t new_argv0 = path_addr + (uint64_t) (new_path_len + 1);
@@ -4616,22 +4149,33 @@ static struct kbox_dispatch forward_execve(
         fprintf(stderr, "kbox: exec %s -> /proc/self/fd/%d\n", pathbuf,
                 tracee_exec_fd);
 
-    /* Clean up CLOEXEC entries before the kernel exec closes them.
-     * Without this, stale shadow socket mappings survive exec and
-     * can collide with FD numbers reused by the new image. */
+    /* Clean up CLOEXEC entries before the kernel exec closes them. Without it,
+     * stale shadow socket mappings survive exec and can collide with FD numbers
+     * reused by the new image.
+     *
+     * WARNING: This destroys CLOEXEC FDs before exec outcome is known.
+     * seccomp-unotify CONTINUE does not report whether the kernel exec succeeds
+     * or fails; the notification is consumed and the supervisor never learns
+     * the result. If exec fails (e.g. ENOENT, EACCES, bad ELF), the tracee
+     * returns to userspace with CLOEXEC descriptors already purged from the FD
+     * table, causing use-after-close on any subsequent I/O to those FDs.
+     *
+     * In practice this is rare: the supervisor validates the binary exists, is
+     * a regular file, and has a valid ELF header before reaching this point.
+     * A correct fix requires either (a) deferring the close to a post-exec
+     * probe (e.g. ptrace EXEC event), or (b) restructuring the supervisor to
+     * snapshot and rollback the FD table on exec failure. Both are substantial
+     * changes for a low-probability edge case.
+     */
     kbox_fd_table_close_cloexec(ctx->fd_table, ctx->sysnrs);
 
     return kbox_dispatch_continue();
 }
 
-/* ------------------------------------------------------------------ */
-/* clone3 namespace-flag sanitization                                 */
-/* ------------------------------------------------------------------ */
+/* clone3 namespace-flag sanitization. */
 
-/*
- * CLONE_NEW* flags that clone3 can smuggle in via clone_args.flags.
- * The BPF deny-list blocks unshare/setns, but clone3 bypasses it
- * unless we check here.
+/* CLONE_NEW* flags that clone3 can smuggle in via clone_args.flags. The BPF
+ * deny-list blocks unshare/setns, but clone3 bypasses it unless we check here.
  */
 #define CLONE_NEWNS 0x00020000ULL
 #define CLONE_NEWTIME 0x00000080ULL
@@ -4653,25 +4197,22 @@ static struct kbox_dispatch forward_clone3(
     uint64_t flags;
     int rc;
 
-    /*
-     * clone3(struct clone_args *args, size_t size).
-     * flags is the first uint64_t field in clone_args.
-     * We only need to read the first 8 bytes.
+    /* clone3(struct clone_args *args, size_t size). flags is the first uint64_t
+     * field in clone_args. We only need to read the first 8 bytes.
      */
     rc = kbox_vm_read(notif->pid, notif->data.args[0], &flags, sizeof(flags));
     if (rc < 0) {
-        /*
-         * Can't read tracee memory -- fail closed with EPERM.
+        /* Can't read tracee memory; fail closed with EPERM.
          *
-         * CONTINUE is unsafe here: a tracee can clear dumpability
-         * via prctl(PR_SET_DUMPABLE, 0), causing process_vm_readv
-         * to fail with EPERM.  If we CONTINUE, clone3 reaches the
-         * host kernel with unchecked namespace flags -- a sandbox
-         * escape.  Returning EPERM is the only safe option.
+         * CONTINUE is unsafe here: a tracee can clear dumpability via
+         * prctl(PR_SET_DUMPABLE, 0), causing process_vm_readv to fail with
+         * EPERM. If we CONTINUE, clone3 reaches host kernel with unchecked
+         * namespace flags: a sandbox escape. Returning EPERM is the only safe
+         * option.
          */
         if (ctx->verbose)
             fprintf(stderr,
-                    "kbox: clone3 denied -- cannot read clone_args "
+                    "kbox: clone3 denied: cannot read clone_args "
                     "(pid=%u, rc=%d)\n",
                     notif->pid, rc);
         return kbox_dispatch_errno(EPERM);
@@ -4680,7 +4221,7 @@ static struct kbox_dispatch forward_clone3(
     if (flags & CLONE_NEW_MASK) {
         if (ctx->verbose)
             fprintf(stderr,
-                    "kbox: clone3 denied -- namespace flags 0x%llx "
+                    "kbox: clone3 denied: namespace flags 0x%llx "
                     "(pid=%u)\n",
                     (unsigned long long) (flags & CLONE_NEW_MASK), notif->pid);
         return kbox_dispatch_errno(EPERM);
@@ -4689,9 +4230,7 @@ static struct kbox_dispatch forward_clone3(
     return kbox_dispatch_continue();
 }
 
-/* ------------------------------------------------------------------ */
-/* Main dispatch function                                             */
-/* ------------------------------------------------------------------ */
+/* Main dispatch function. */
 
 struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
                                            const void *notif_ptr)
@@ -4706,7 +4245,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
                 name ? name : "unknown");
     }
 
-    /* === Legacy x86_64 Syscalls === */
+    /* Legacy x86_64 syscalls. */
 
     if (nr == h->stat)
         return forward_stat_legacy(notif, ctx, 0);
@@ -4729,14 +4268,14 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->open)
         return forward_open_legacy(notif, ctx);
 
-    /* === File Open/Create === */
+    /* File open/create. */
 
     if (nr == h->openat)
         return forward_openat(notif, ctx);
     if (nr == h->openat2)
         return forward_openat2(notif, ctx);
 
-    /* === Metadata === */
+    /* Metadata. */
 
     if (nr == h->fstat)
         return forward_fstat(notif, ctx);
@@ -4749,7 +4288,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->faccessat2)
         return forward_faccessat2(notif, ctx);
 
-    /* === Directories === */
+    /* Directories. */
 
     if (nr == h->getdents64)
         return forward_getdents64(notif, ctx);
@@ -4768,7 +4307,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->fchownat)
         return forward_fchownat(notif, ctx);
 
-    /* === Navigation === */
+    /* Navigation. */
 
     if (nr == h->chdir)
         return forward_chdir(notif, ctx);
@@ -4777,7 +4316,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->getcwd)
         return forward_getcwd(notif, ctx);
 
-    /* === Identity: UID === */
+    /* Identity: UID. */
 
     if (nr == h->getuid) {
         DISPATCH_GET_UID(notif, ctx, ctx->override_uid, kbox_lkl_getuid);
@@ -4796,7 +4335,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         return forward_getresuid(notif, ctx);
     }
 
-    /* === Identity: GID === */
+    /* Identity: GID. */
 
     if (nr == h->getgid) {
         DISPATCH_GET_GID(notif, ctx, ctx->override_gid, kbox_lkl_getgid);
@@ -4815,7 +4354,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         return forward_getresgid(notif, ctx);
     }
 
-    /* === Identity: Groups === */
+    /* Identity: groups. */
 
     if (nr == h->getgroups) {
         if (ctx->host_root) {
@@ -4828,7 +4367,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         return forward_getgroups(notif, ctx);
     }
 
-    /* === Identity: set* === */
+    /* Identity: set*. */
 
     if (nr == h->setuid)
         DISPATCH_SET_ID(notif, ctx, forward_setuid);
@@ -4847,14 +4386,14 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->setfsgid)
         DISPATCH_SET_ID(notif, ctx, forward_setfsgid);
 
-    /* === Mount === */
+    /* Mount. */
 
     if (nr == h->mount)
         return forward_mount(notif, ctx);
     if (nr == h->umount2)
         return forward_umount2(notif, ctx);
 
-    /* === FD Operations === */
+    /* FD operations. */
 
     if (nr == h->close)
         return forward_close(notif, ctx);
@@ -4867,7 +4406,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->dup3)
         return forward_dup3(notif, ctx);
 
-    /* === I/O === */
+    /* I/O. */
 
     if (nr == h->read)
         return forward_read_like(notif, ctx, 0);
@@ -4878,7 +4417,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->lseek)
         return forward_lseek(notif, ctx);
 
-    /* === Networking === */
+    /* Networking. */
 
     if (nr == h->socket)
         return forward_socket(notif, ctx);
@@ -4891,7 +4430,8 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->recvfrom)
         return forward_recvfrom(notif, ctx);
     /* sendmsg: BPF allow-listed (SCM_RIGHTS), never reaches here.
-     * Shadow socket callers should use sendto for addressed datagrams. */
+     * Shadow socket callers should use sendto for addressed datagrams.
+     */
     if (nr == h->recvmsg)
         return forward_recvmsg(notif, ctx);
     if (nr == h->getsockopt)
@@ -4905,7 +4445,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->shutdown)
         return forward_shutdown(notif, ctx);
 
-    /* === I/O Extended === */
+    /* I/O extended. */
 
     if (nr == h->pwrite64)
         return forward_pwrite64(notif, ctx);
@@ -4928,16 +4468,15 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->ioctl)
         return forward_ioctl(notif, ctx);
 
-    /* === File Operations === */
+    /* File operations. */
 
     if (nr == h->readlinkat)
         return forward_readlinkat(notif, ctx);
     if (nr == h->pipe2)
         return forward_pipe2(notif, ctx);
     if (nr == h->pipe) {
-        /*
-         * Legacy pipe(2) has only one arg: pipefd.  Create a host
-         * pipe and inject via ADDFD, same as the pipe2 path.
+        /* Legacy pipe(2) has only one arg: pipefd. Create host pipe and inject
+         * via ADDFD, same as the pipe2 path.
          */
         pid_t ppid = notif->pid;
         uint64_t remote_pfd = notif->data.args[0];
@@ -4982,7 +4521,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->copy_file_range)
         return kbox_dispatch_errno(ENOSYS);
 
-    /* === Process Info === */
+    /* Process info. */
 
     if (nr == h->getpid)
         return kbox_dispatch_value(1);
@@ -4999,7 +4538,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->setsid)
         return kbox_dispatch_continue();
 
-    /* === Time === */
+    /* Time. */
 
     if (nr == h->clock_gettime)
         return forward_clock_gettime(notif, ctx);
@@ -5008,7 +4547,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->gettimeofday)
         return forward_gettimeofday(notif, ctx);
 
-    /* === Process Lifecycle === */
+    /* Process lifecycle. */
 
     if (nr == h->umask)
         return forward_umask(notif, ctx);
@@ -5027,7 +4566,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->waitid)
         return kbox_dispatch_continue();
 
-    /* === Signals (CONTINUE) === */
+    /* Signals (CONTINUE). */
     /* Signal disposition and masking are per-process host kernel state. */
 
     if (nr == h->rt_sigaction)
@@ -5047,19 +4586,17 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (h->alarm >= 0 && nr == h->alarm)
         return kbox_dispatch_continue(); /* alarm (not on aarch64) */
 
-    /* === Signal Delivery (dispatch: PID validation) === */
+    /* Signal delivery (dispatch: PID validation). */
     /*
-     * kill/tgkill/tkill must go through dispatch (not BPF deny) because
-     * ash needs them for job control.  We validate the target PID belongs
-     * to the guest process tree.  PID is in register args (no TOCTOU).
+     * kill/tgkill/tkill must go through dispatch (not BPF deny) because ash
+     * needs them for job control. We validate the target PID belongs to the
+     * guest process tree.  PID is in register args (no TOCTOU).
      */
 
-    /*
-     * Accept the guest's virtual PID (1) as equivalent to the
-     * real host PID.  getpid/gettid return 1, so raise() calls
-     * tgkill(1, 1, sig) which must reach the host kernel with
-     * the real PID.  Also accept notif->pid (the tracee's actual
-     * host PID from the seccomp notification).
+    /* Accept the guest's virtual PID (1) as equivalent to the real host PID.
+     * getpid/gettid return 1, so raise() calls tgkill(1, 1, sig) which must
+     * reach the host kernel with the real PID. Also accept notif->pid (the
+     * tracee's actual host PID from the seccomp notification).
      */
 #define IS_GUEST_PID(p) \
     ((p) == ctx->child_pid || (p) == (pid_t) notif->pid || (p) == 1)
@@ -5069,14 +4606,13 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         int sig = (int) notif->data.args[1];
         if (!IS_GUEST_PID(target) && target != 0) {
             if (ctx->verbose)
-                fprintf(stderr, "kbox: kill(%d) denied -- not guest PID\n",
+                fprintf(stderr, "kbox: kill(%d) denied: not guest PID\n",
                         target);
             return kbox_dispatch_errno(EPERM);
         }
-        /*
-         * Emulate kill() from the supervisor.  Virtual PID 1 and
-         * process-group 0 must target the real child PID, not the
-         * host's PID 1 or the supervisor's process group.
+        /* Emulate kill() from the supervisor. Virtual PID 1 and process-group
+         * 0 must target the real child PID, not the host's PID 1 or the
+         * supervisor's process group.
          */
         {
             pid_t real_target = ctx->child_pid;
@@ -5094,17 +4630,16 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         int sig = (int) notif->data.args[2];
         if (!IS_GUEST_PID(tgid)) {
             if (ctx->verbose)
-                fprintf(stderr, "kbox: tgkill(%d) denied -- not guest PID\n",
+                fprintf(stderr, "kbox: tgkill(%d) denied: not guest PID\n",
                         tgid);
             return kbox_dispatch_errno(EPERM);
         }
-        /*
-         * The guest passes its virtual PID (1) but the host kernel
-         * needs the real PID.  We can't modify syscall args via
-         * seccomp-unotify, so emulate: call tgkill with the real
-         * PID from the supervisor.  The tracee's tid is its real
-         * host tid (gettid returns virtual 1, but the seccomp
-         * notification contains the real tid in notif->pid).
+
+        /* The guest passes its virtual PID (1) but the host kernel needs the
+         * real PID. We can't modify syscall args via seccomp-unotify, so
+         * emulate: call tgkill with the real PID from the supervisor. The
+         * tracee's tid is its real host tid (gettid returns virtual 1, but the
+         * seccomp notification contains the real tid in notif->pid).
          */
         {
             pid_t real_tgid = ctx->child_pid;
@@ -5120,7 +4655,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         int sig = (int) notif->data.args[1];
         if (!IS_GUEST_PID(target)) {
             if (ctx->verbose)
-                fprintf(stderr, "kbox: tkill(%d) denied -- not guest PID\n",
+                fprintf(stderr, "kbox: tkill(%d) denied: not guest PID\n",
                         target);
             return kbox_dispatch_errno(EPERM);
         }
@@ -5138,7 +4673,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         return kbox_dispatch_errno(EPERM);
     }
 
-    /* === Threading (CONTINUE) === */
+    /* Threading (CONTINUE). */
     /* Thread management is host kernel state; LKL is not involved. */
 
     if (nr == h->set_tid_address)
@@ -5159,7 +4694,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         if (cflags & CLONE_NEW_MASK) {
             if (ctx->verbose)
                 fprintf(stderr,
-                        "kbox: clone denied -- namespace flags 0x%llx "
+                        "kbox: clone denied: namespace flags 0x%llx "
                         "(pid=%u)\n",
                         (unsigned long long) (cflags & CLONE_NEW_MASK),
                         notif->pid);
@@ -5172,7 +4707,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->vfork)
         return kbox_dispatch_continue(); /* legacy vfork */
 
-    /* === Memory Mapping === */
+    /* Memory mapping. */
 
     if (nr == h->mmap)
         return forward_mmap(notif, ctx);
@@ -5185,8 +4720,8 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->membarrier)
         return kbox_dispatch_continue(); /* memory barrier (musl threads) */
 
-    /* === Scheduling (CONTINUE) === */
-    /* Scheduler ops are safe -- RLIMIT_RTPRIO=0 prevents RT starvation. */
+    /* Scheduling (CONTINUE). */
+    /* Scheduler ops are safe; RLIMIT_RTPRIO=0 prevents RT starvation. */
 
     if (nr == h->sched_yield)
         return kbox_dispatch_continue();
@@ -5207,12 +4742,11 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->sched_getaffinity)
         return kbox_dispatch_continue();
 
-    /* === Resource Management === */
+    /* Resource management. */
 
-    /*
-     * prlimit64: GET operations are safe (read-only).  SET operations
-     * on dangerous resources (RLIMIT_NPROC, RLIMIT_NOFILE, RLIMIT_RTPRIO)
-     * are blocked to prevent the guest from escaping resource limits.
+    /* prlimit64: GET ops are safe (read-only). SET ops on dangerous resources
+     * (RLIMIT_NPROC, RLIMIT_NOFILE, RLIMIT_RTPRIO) are blocked to prevent the
+     * guest from escaping resource limits.
      */
     if (nr == h->prlimit64) {
         uint64_t new_limit_ptr = notif->data.args[2];
@@ -5235,7 +4769,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->getrusage)
         return kbox_dispatch_continue(); /* read resource usage */
 
-    /* === I/O Multiplexing (CONTINUE) === */
+    /* I/O multiplexing (CONTINUE). */
     /* All polling/select variants are pure host kernel operations. */
 
     if (nr == h->epoll_create1)
@@ -5253,7 +4787,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->poll)
         return kbox_dispatch_continue(); /* legacy poll (musl/busybox) */
 
-    /* === Sleep/Timer (CONTINUE) === */
+    /* Sleep/timer (CONTINUE). */
     /* Time waiting is pure host kernel; no LKL involvement. */
 
     if (nr == h->nanosleep)
@@ -5271,7 +4805,7 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->eventfd2)
         return kbox_dispatch_continue();
 
-    /* === Filesystem Info (CONTINUE/dispatch) === */
+    /* Filesystem info (CONTINUE/dispatch). */
 
     if (nr == h->statfs)
         return kbox_dispatch_continue(); /* filesystem stats */
@@ -5280,9 +4814,8 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
     if (nr == h->sysinfo)
         return kbox_dispatch_continue(); /* system info (busybox free) */
 
-    /*
-     * readlink: takes a path pointer (TOCTOU risk).  Forward to LKL
-     * via readlinkat instead of CONTINUE.
+    /* readlink: takes path pointer (TOCTOU risk). Forward to LKL via readlinkat
+     * instead of CONTINUE.
      */
     if (nr == h->readlink) {
         char path[4096];
@@ -5305,14 +4838,14 @@ struct kbox_dispatch kbox_dispatch_syscall(struct kbox_supervisor_ctx *ctx,
         return kbox_dispatch_value(lret);
     }
 
-    /* === Exec (in-image binary extraction + pathname rewrite) === */
+    /* Exec (in-image binary extraction + pathname rewrite). */
 
     if (nr == h->execve)
         return forward_execve(notif, ctx, 0);
     if (nr == h->execveat)
         return forward_execve(notif, ctx, 1);
 
-    /* === Default: deny unknown syscalls === */
+    /* Default: deny unknown syscalls. */
     if (ctx->verbose)
         fprintf(stderr, "kbox: DENY unknown syscall nr=%d (pid=%u)\n", nr,
                 notif->pid);

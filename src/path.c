@@ -1,21 +1,20 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * path.c - Path translation for the seccomp supervisor.
+
+/* Path translation for the seccomp supervisor.
  *
- * Guest paths must be translated to LKL paths (image mode) or host
- * paths (host mode) before forwarding syscalls.  Escape prevention
- * ensures resolved paths stay within the designated root.
+ * Guest paths must be translated to LKL paths (image mode) or host paths (host
+ * mode) before forwarding syscalls. Escape prevention ensures resolved paths
+ * stay within the designated root.
  *
  */
-
-#include "kbox/path.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "kbox/syscall-nr.h"
+#include "kbox/path.h"
+#include "syscall-nr.h"
 
 /* Check if path starts with prefix, with proper boundary handling. */
 static bool starts_with(const char *path, const char *prefix)
@@ -33,8 +32,7 @@ static bool is_prefix_dir(const char *path, const char *prefix)
     return path[plen] == '\0' || path[plen] == '/';
 }
 
-/*
- * Check if the string at `s` is composed entirely of decimal digits.
+/* Check if the string at @s is composed entirely of decimal digits.
  * Returns true for non-empty all-digit strings (i.e., a numeric PID).
  */
 static bool is_numeric(const char *s, size_t len)
@@ -48,15 +46,13 @@ static bool is_numeric(const char *s, size_t len)
     return true;
 }
 
-/*
- * Check if a /proc path uses a magic symlink that escapes the sandbox.
+/* Check if a /proc path uses a magic symlink that escapes the sandbox.
  *
- * The kernel exposes /proc/<pid>/root, /proc/<pid>/cwd, and
- * /proc/<pid>/exe as magic symlinks.  "root" points to the process's
- * filesystem root, "cwd" to its working directory, and "exe" to the
- * main executable.  If the host kernel resolves these via CONTINUE,
- * the guest escapes the sandbox because the symlink target is on the
- * host filesystem, not inside the LKL image.
+ * The kernel exposes /proc/<pid>/root, /proc/<pid>/cwd, and /proc/<pid>/exe
+ * as magic symlinks. "root" points to the process's filesystem root, "cwd" to
+ * its working directory, and "exe" to the main executable. If the host kernel
+ * resolves these via CONTINUE, the guest escapes the sandbox because symlink
+ * target is on the host filesystem, not inside the LKL image.
  *
  * Patterns detected:
  *   /proc/self/root[/...]
@@ -95,8 +91,7 @@ bool kbox_is_proc_escape_path(const char *path)
         return false;
     const char *tail = slash + 1;
 
-    /*
-     * Handle task/<tid>/ subdirectory: /proc/<pid>/task/<tid>/root
+    /* Handle task/<tid>/ subdirectory: /proc/<pid>/task/<tid>/root
      * Each thread has its own magic symlinks under task/<tid>/.
      */
     if (starts_with(tail, "task/")) {
@@ -164,16 +159,15 @@ bool kbox_is_loader_runtime_path(const char *path)
     return false;
 }
 
-/*
- * Lexical path normalization.
+/* Lexical path normalization.
  *
- * Processes each component of `input`:
+ * Processes each component of input:
  *   "."   -> skip
  *   ".."  -> pop last component (don't go above root)
  *   other -> append
  *
- * If `input` is absolute, `base` is ignored and we start from "/".
- * Result is always absolute and written to `out`.
+ * If input is absolute, base is ignored and we start from "/".
+ * Result is always absolute and written to out.
  */
 int kbox_normalize_join(const char *base,
                         const char *input,
@@ -224,8 +218,7 @@ int kbox_normalize_join(const char *base,
         }
 
         if (slen == 2 && seg[0] == '.' && seg[1] == '.') {
-            /*
-             * Parent directory: pop the last component.
+            /* Parent directory: pop the last component.
              * Never go above root (wlen stays >= 1 for "/").
              */
             if (wlen > 1) {
@@ -304,15 +297,15 @@ int kbox_normalize_virtual_relative(const char *path,
 
     if (rest && *rest) {
         if (snprintf(out, out_size, "%s/%s", prefix, rest) >= (int) out_size)
-            return 0;
+            return -1;
     } else {
         if (snprintf(out, out_size, "%s", prefix) >= (int) out_size)
-            return 0;
+            return -1;
     }
     return 1;
 }
 
-int kbox_read_proc_cwd(pid_t pid, char *out, size_t out_size)
+static int kbox_read_proc_cwd(pid_t pid, char *out, size_t out_size)
 {
     char link[64];
     ssize_t n;
@@ -330,33 +323,11 @@ int kbox_read_proc_cwd(pid_t pid, char *out, size_t out_size)
     return 0;
 }
 
-int kbox_read_proc_fd_path(pid_t pid, long fd, char *out, size_t out_size)
-{
-    char link[64];
-    ssize_t n;
-
-    if (out_size == 0)
-        return -EINVAL;
-
-    if (fd < 0)
-        return -EBADF;
-
-    snprintf(link, sizeof(link), "/proc/%d/fd/%ld", (int) pid, fd);
-    n = readlink(link, out, out_size - 1);
-    if (n < 0)
-        return -errno;
-    if ((size_t) n >= out_size - 1)
-        return -ENAMETOOLONG;
-    out[n] = '\0';
-    return 0;
-}
-
-/*
- * Translate a guest path for LKL syscalls (image mode).
+/* Translate a guest path for LKL syscalls (image mode).
  *
- * Virtual paths (/proc, /sys, /dev) pass through.  Relative virtual
- * paths (proc/..., sys/..., dev/...) are normalized.  Everything else
- * passes through because image mode has already chroot'd into the mount.
+ * Virtual paths (/proc, /sys, /dev) pass through. Relative virtual paths
+ * (proc/..., sys/..., dev/...) are normalized. Everything else passes
+ * through because image mode has already chroot'd into the mount.
  */
 int kbox_translate_path_for_lkl(pid_t pid,
                                 const char *path,
@@ -364,11 +335,10 @@ int kbox_translate_path_for_lkl(pid_t pid,
                                 char *out,
                                 size_t out_size)
 {
-    /*
-     * Normalize absolute paths before the virtual-prefix check to prevent
-     * escape via paths like /proc/../etc/passwd.  Without normalization,
-     * the prefix test sees "/proc" and returns CONTINUE, letting the host
-     * kernel resolve ".." and reach outside /proc.
+    /* Normalize absolute paths before the virtual-prefix check to prevent
+     * escape via paths like /proc/../etc/passwd. Without normalization, the
+     * prefix test sees "/proc" and returns CONTINUE, letting the host kernel
+     * resolve ".." and reach outside /proc.
      */
     char norm[KBOX_MAX_PATH];
     const char *effective = path;
@@ -385,13 +355,15 @@ int kbox_translate_path_for_lkl(pid_t pid,
         return 0;
     }
 
-    /*
-     * Relative virtual paths (e.g., "proc/self/status") get converted
-     * to absolute form ("/proc/self/status").  However, we must verify
-     * the result is still virtual after normalization to prevent escape
-     * via "proc/../etc/passwd" -> "/proc/../etc/passwd" -> "/etc/passwd".
+    /* Relative virtual paths (e.g., "proc/self/status") get converted to
+     * absolute form ("/proc/self/status"). However, we must verify the result
+     * is still virtual after normalization to prevent escape via
+     * "proc/../etc/passwd" -> "/proc/../etc/passwd" -> "/etc/passwd".
      */
-    if (kbox_normalize_virtual_relative(path, out, out_size)) {
+    int vrel = kbox_normalize_virtual_relative(path, out, out_size);
+    if (vrel < 0)
+        return -ENAMETOOLONG;
+    if (vrel > 0) {
         char virt_norm[KBOX_MAX_PATH];
         if (kbox_normalize_join("/", out, virt_norm, sizeof(virt_norm)) == 0 &&
             kbox_is_lkl_virtual_path(virt_norm)) {
@@ -400,12 +372,11 @@ int kbox_translate_path_for_lkl(pid_t pid,
             memcpy(out, virt_norm, strlen(virt_norm) + 1);
             return 0;
         }
-        /* Normalized result escapes virtual prefix -- fall through. */
+        /* Normalized result escapes virtual prefix; fall through. */
     }
 
-    /*
-     * No host_root means pure image mode: path passes through
-     * unchanged because we are already inside the LKL mount.
+    /* No host_root means pure image mode: path passes through unchanged because
+     * we are already inside the LKL mount.
      */
     if (!host_root) {
         if (strlen(path) >= out_size)
@@ -414,10 +385,9 @@ int kbox_translate_path_for_lkl(pid_t pid,
         return 0;
     }
 
-    /*
-     * Host root is set: resolve relative to the root and verify
-     * we don't escape.  Absolute paths are re-rooted under host_root;
-     * relative paths resolve against the tracee's cwd.
+    /* Host root is set: resolve relative to root and verify we don't escape.
+     * Absolute paths are re-rooted under host_root; relative paths resolve
+     * against the tracee's cwd.
      */
     if (path[0] == '/') {
         /* Re-root: join host_root + path (skip leading '/') */
@@ -436,8 +406,7 @@ int kbox_translate_path_for_lkl(pid_t pid,
     if (!is_prefix_dir(out, host_root) && strcmp(out, host_root) != 0)
         return -EPERM;
 
-    /*
-     * Convert the host-side resolved path to a guest-relative path.
+    /* Convert the host-side resolved path to a guest-relative path.
      * Strip host_root prefix to get the path as seen inside the mount.
      */
     {
@@ -456,99 +425,12 @@ int kbox_translate_path_for_lkl(pid_t pid,
             memcpy(tmp, tail, tlen + 1);
             memcpy(out, tmp, tlen + 1);
         } else {
-            /*
-             * Shouldn't happen because is_prefix_dir already
-             * checked, but be safe.
+            /* Shouldn't happen because is_prefix_dir already checked, but be
+             * safe.
              */
             return -EPERM;
         }
     }
-
-    return 0;
-}
-
-/*
- * Translate a guest path for host-side syscalls (host mode).
- *
- * Resolves the path relative to the tracee's cwd or the dirfd, then
- * verifies it stays within host_root.  Returns the fully resolved
- * host-side path.
- */
-int kbox_translate_path_for_host(pid_t pid,
-                                 const char *path,
-                                 long dirfd,
-                                 const char *host_root,
-                                 char *out,
-                                 size_t out_size)
-{
-    char base[KBOX_MAX_PATH];
-
-    /* Normalize before virtual check -- same escape prevention as LKL path. */
-    char norm[KBOX_MAX_PATH];
-    const char *effective = path;
-
-    if (path[0] == '/') {
-        if (kbox_normalize_join("/", path, norm, sizeof(norm)) == 0)
-            effective = norm;
-    }
-
-    if (kbox_is_lkl_virtual_path(effective)) {
-        if (strlen(effective) >= out_size)
-            return -ENAMETOOLONG;
-        memcpy(out, effective, strlen(effective) + 1);
-        return 0;
-    }
-
-    /* Same relative virtual normalization + escape check as LKL path. */
-    if (kbox_normalize_virtual_relative(path, out, out_size)) {
-        char virt_norm[KBOX_MAX_PATH];
-        if (kbox_normalize_join("/", out, virt_norm, sizeof(virt_norm)) == 0 &&
-            kbox_is_lkl_virtual_path(virt_norm)) {
-            if (strlen(virt_norm) >= out_size)
-                return -ENAMETOOLONG;
-            memcpy(out, virt_norm, strlen(virt_norm) + 1);
-            return 0;
-        }
-        /* Normalized result escapes virtual prefix -- fall through. */
-    }
-
-    if (!host_root) {
-        if (strlen(path) >= out_size)
-            return -ENAMETOOLONG;
-        memcpy(out, path, strlen(path) + 1);
-        return 0;
-    }
-
-    /*
-     * Determine the base directory for resolution:
-     *   - absolute path: root "/"
-     *   - AT_FDCWD: tracee's cwd via /proc
-     *   - numeric dirfd: resolve via /proc/PID/fd/FD
-     */
-    if (path[0] == '/') {
-        /*
-         * Absolute path: re-root under host_root.
-         * Join host_root + path (skip leading '/').
-         */
-        if (kbox_normalize_join(host_root, path + 1, out, out_size) < 0)
-            return -ENAMETOOLONG;
-    } else {
-        int rc;
-
-        if (dirfd == AT_FDCWD_LINUX)
-            rc = kbox_read_proc_cwd(pid, base, sizeof(base));
-        else
-            rc = kbox_read_proc_fd_path(pid, dirfd, base, sizeof(base));
-        if (rc < 0)
-            return rc;
-
-        if (kbox_normalize_join(base, path, out, out_size) < 0)
-            return -ENAMETOOLONG;
-    }
-
-    /* Verify the resolved path stays within host_root. */
-    if (!is_prefix_dir(out, host_root) && strcmp(out, host_root) != 0)
-        return -EPERM;
 
     return 0;
 }

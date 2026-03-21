@@ -1,28 +1,25 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * net-slirp.c - User-mode networking via minislirp.
+
+/* User-mode networking via minislirp.
  *
- * Bridges LKL's virtio-net device with a SLIRP instance to provide
- * outbound TCP/UDP networking without privileges.
+ * Bridges LKL's virtio-net device with a SLIRP instance to provide outbound
+ * TCP/UDP networking without privileges.
  *
  * Threading model:
- *   - LKL's virtio-net poll callback is called from an LKL kernel
- *     thread and must block until data is available.
+ *   - LKL's virtio-net poll callback is called from an LKL kernel thread and
+ *     must block until data is available.
  *   - SLIRP's callback-based poll cycle runs on the event loop thread.
- *   - Bridge via pipe: SLIRP output -> write length-prefixed frame to
- *     pipe -> LKL poll callback unblocks -> RX delivery.
- *   - LKL TX callback -> slirp_input() can be called directly
- *     (same address space, LKL is single-threaded for I/O).
- *   - Shadow sockets: dispatch thread registers socketpair+LKL FD via
- *     command pipe; event loop pumps data between them.
+ *   - Bridge via pipe: SLIRP output -> write length-prefixed frame to pipe ->
+ *     LKL poll callback unblocks -> RX delivery.
+ *   - LKL TX callback -> slirp_input() can be called directly (same address
+ *     space, LKL is single-threaded for I/O).
+ *   - Shadow sockets: dispatch thread registers socketpair+LKL FD via command
+ *     pipe; event loop pumps data between them.
  *
  * Compiled only when KBOX_HAS_SLIRP is defined.
  */
 
 #ifdef KBOX_HAS_SLIRP
-
-#include "kbox/lkl-wrap.h"
-#include "kbox/net.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -37,9 +34,11 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-/* minislirp headers (fetched by scripts/fetch-minislirp.sh) */
-// cppcheck-suppress missingInclude
+/* minislirp headers */
+/* cppcheck-suppress missingInclude */
 #include "libslirp.h"
+#include "lkl-wrap.h"
+#include "net.h"
 
 /* Guest network configuration */
 #define GUEST_IP_STR "10.0.2.15"
@@ -58,22 +57,18 @@
 /* Maximum pollfd entries: SLIRP FDs + shadow sockets + wakeup pipe */
 #define MAX_POLLFDS 256
 
-/* ------------------------------------------------------------------ */
-/* RX pipe: length-prefixed framing                                   */
-/* ------------------------------------------------------------------ */
+/* RX pipe: length-prefixed framing. */
 
-/*
- * SLIRP -> LKL packet delivery uses a pipe with 2-byte length headers.
- * Without framing, consecutive writes can coalesce and corrupt packets.
+/* SLIRP -> LKL packet delivery uses a pipe with 2-byte length headers. Without
+ * framing, consecutive writes can coalesce and corrupt packets.
  *
  *   [ uint16_t len ][ payload bytes ... ]
  */
 static int rx_pipe[2] = {-1, -1};
 
-/*
- * TX pipe: LKL net_tx callback -> event loop -> slirp_input.
- * libslirp is NOT thread-safe, so slirp_input must only be called
- * from the event loop thread.  Same length-prefixed framing as RX.
+/* TX pipe: LKL net_tx callback -> event loop -> slirp_input.
+ * libslirp is NOT thread-safe, so slirp_input must only be called from event
+ * loop thread. Same length-prefixed framing as RX.
  */
 static int tx_pipe[2] = {-1, -1};
 
@@ -83,28 +78,24 @@ static int slirp_running; /* accessed via __atomic builtins */
 /* Detected syscall ABI, stored during kbox_net_configure. */
 static const struct kbox_sysnrs *net_sysnrs;
 
-/*
- * Gate: blocks the LKL poll thread during boot and interface config.
+/* Gate: blocks the LKL poll thread during boot and interface config.
  *
- * lkl_netdev_add creates a poll thread that immediately calls ops->poll.
- * If the poll thread runs during boot or configuration, it competes for
- * the LKL CPU (BKL) and causes deadlocks in lkl_if_up / SIOCSIFADDR.
+ * lkl_netdev_add creates a poll thread that immediately calls ops->poll. If the
+ * poll thread runs during boot or configuration, it competes for the LKL CPU
+ * (BKL) and causes deadlocks in lkl_if_up / SIOCSIFADDR.
  *
- * Solution: ops->poll blocks on this flag until configuration is done.
- * The main thread configures the interface uncontested, then opens the
- * gate.  The poll thread wakes up and starts normal operation.
+ * Solution: ops->poll blocks on this flag until configuration is done. The main
+ * thread configures the interface uncontested, then opens the gate. The poll
+ * thread wakes up and starts normal operation.
  */
 static int net_ready; /* __atomic: 0 = gate closed, 1 = gate open */
 
-/* ------------------------------------------------------------------ */
-/* RX packet queue (lock-free SPSC ring buffer)                       */
-/* ------------------------------------------------------------------ */
+/* RX packet queue (lock-free SPSC ring buffer). */
 
-/*
- * LKL's virtio-net driver holds the Big Kernel Lock (BKL) during the
- * ops->poll/ops->rx callback cycle.  If ops->rx blocks (e.g., waiting
- * on the rx_pipe), ALL other lkl_syscall() calls deadlock -- including
- * lkl_if_up, kbox_lkl_socket, kbox_lkl_connect, etc.
+/* LKL's virtio-net driver holds the Big Kernel Lock (BKL) during the
+ * ops->poll/ops->rx callback cycle. If ops->rx blocks (e.g., waiting on the
+ * rx_pipe), ALL other lkl_syscall() calls deadlock; including lkl_if_up,
+ * kbox_lkl_socket, kbox_lkl_connect, etc.
  *
  * Solution: a dedicated reader thread consumes rx_pipe into this queue.
  * ops->poll checks if the queue is non-empty (instant, no blocking).
@@ -166,7 +157,7 @@ static void *rx_reader_loop(void *arg)
         unsigned tail = __atomic_load_n(&rx_tail, __ATOMIC_RELAXED);
         unsigned next = (head + 1) & RX_QUEUE_MASK;
         if (next == tail) {
-            /* Queue full -- drop packet. */
+            /* Queue full: drop packet. */
             continue;
         }
         rx_queue[head].len = pkt_len;
@@ -182,27 +173,21 @@ out:
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* SLIRP instance and LKL netdev                                      */
-/* ------------------------------------------------------------------ */
+/* SLIRP instance and LKL netdev. */
 
 static Slirp *slirp_instance;
 static struct lkl_netdev slirp_netdev;
 static struct lkl_dev_net_ops slirp_netdev_ops;
 static int lkl_netdev_id = -1;
 
-/* ------------------------------------------------------------------ */
-/* Event loop state                                                   */
-/* ------------------------------------------------------------------ */
+/* Event loop state. */
 
 static pthread_t slirp_thread;
 
 /* Wakeup pipe: write a byte to wake the event loop from poll. */
 static int wakeup_pipe[2] = {-1, -1};
 
-/* ------------------------------------------------------------------ */
-/* Shadow socket table                                                */
-/* ------------------------------------------------------------------ */
+/* Shadow socket table. */
 
 struct shadow_socket {
     int lkl_fd;        /* LKL-side socket FD */
@@ -220,9 +205,7 @@ struct shadow_socket {
 static struct shadow_socket shadow_sockets[MAX_SHADOW_SOCKETS];
 static pthread_mutex_t shadow_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* ------------------------------------------------------------------ */
-/* SLIRP timers (sorted linked list)                                  */
-/* ------------------------------------------------------------------ */
+/* SLIRP timers (sorted linked list). */
 
 struct slirp_timer {
     int64_t expire_ms;
@@ -326,13 +309,9 @@ static int next_timer_timeout_ms(void)
     return (int) delta;
 }
 
-/* ------------------------------------------------------------------ */
-/* SLIRP callbacks                                                    */
-/* ------------------------------------------------------------------ */
+/* SLIRP callbacks. */
 
-/*
- * Write a complete buffer to a file descriptor, retrying on short writes.
- */
+/* Write a complete buffer to a file descriptor, retrying on short writes. */
 static ssize_t write_all(int fd, const void *buf, size_t len)
 {
     const uint8_t *p = buf;
@@ -350,12 +329,10 @@ static ssize_t write_all(int fd, const void *buf, size_t len)
     return (ssize_t) len;
 }
 
-/*
- * slirp_send_packet is only called from the SLIRP event loop thread
- * (single writer), but we use write_all to handle short writes on
- * large packets that exceed PIPE_BUF.  The RX pipe reader (net_rx)
- * runs on a single LKL thread, so framing integrity is maintained
- * as long as there is exactly one writer.
+/* slirp_send_packet is only called from the SLIRP event loop thread (single
+ * writer), but we use write_all to handle short writes on large packets that
+ * exceed PIPE_BUF. The RX pipe reader (net_rx) runs on a single LKL thread, so
+ * framing integrity is maintained as long as there is exactly one writer.
  */
 static ssize_t slirp_send_packet(const void *buf, size_t len, void *opaque)
 {
@@ -432,9 +409,7 @@ static const SlirpCb slirp_callbacks = {
     .unregister_poll_socket = slirp_unregister_poll_socket,
 };
 
-/* ------------------------------------------------------------------ */
-/* Callback-based SLIRP poll integration                              */
-/* ------------------------------------------------------------------ */
+/* Callback-based SLIRP poll integration. */
 
 struct poll_ctx {
     struct pollfd pfds[MAX_POLLFDS];
@@ -480,12 +455,9 @@ static int get_revents_cb(int idx, void *opaque)
     return revents;
 }
 
-/* ------------------------------------------------------------------ */
-/* Shadow socket I/O pump                                             */
-/* ------------------------------------------------------------------ */
+/* Shadow socket I/O pump. */
 
-/*
- * For each registered shadow socket, the event loop:
+/* For each registered shadow socket, the event loop:
  *   1. Adds supervisor_fd to the pollfd array (POLLIN)
  *   2. After poll, reads data from supervisor_fd and writes to LKL socket
  *   3. Reads from LKL socket (non-blocking) and writes to supervisor_fd
@@ -550,12 +522,11 @@ static int shadow_nonfatal_recv_error(const struct shadow_socket *sock, long r)
     if (r == -EAGAIN || r == -EWOULDBLOCK)
         return 1;
 
-    /*
-     * Stream sockets can report "not connected" or "invalid" while the
+    /* Stream sockets can report "not connected" or "invalid" while the
      * guest-visible socketpair is already live and the TCP state machine is
      * still settling.  The event loop probes with recvfrom(MSG_DONTWAIT) on
-     * every iteration, so treating these as fatal tears down the bridge
-     * before the first guest write().
+     * every iteration, so treating these as fatal tears down the bridge before
+     * the first guest write().
      */
     if (sock->sock_type == SOCK_STREAM && (r == -ENOTCONN || r == -EINVAL))
         return 1;
@@ -618,16 +589,14 @@ static void pump_shadow_sockets(struct poll_ctx *ctx, int shadow_base)
             continue;
         }
 
-        /*
-         * LKL socket -> supervisor_fd.
-         * Probe every loop iteration so TCP/UDP responses are drained even
-         * when the host socketpair itself had no readable event this cycle.
+        /* LKL socket -> supervisor_fd.
+         * Probe every loop iteration so TCP/UDP responses are drained even when
+         * the host socketpair itself had no readable event this cycle.
          *
-         * Flush pending IRQs first: lkl_cpu_get+put triggers IRQ
-         * processing in lkl_cpu_put, which runs softirqs that deliver
-         * packets from the virtio-net driver to the socket layer.
-         * Without this, recvfrom may return EAGAIN even though net_rx
-         * already delivered a packet to the kernel.
+         * Flush pending IRQs first: lkl_cpu_get+put triggers IRQ processing in
+         * lkl_cpu_put, which runs softirqs that deliver packets from virtio-net
+         * driver to the socket layer. Without this, recvfrom may return EAGAIN
+         * even though net_rx already delivered a packet to the kernel.
          */
         if (sock->to_supervisor_len == 0) {
             /* Flush pending LKL IRQs so socket data is available. */
@@ -657,15 +626,11 @@ static void pump_shadow_sockets(struct poll_ctx *ctx, int shadow_base)
     pthread_mutex_unlock(&shadow_lock);
 }
 
-/* ------------------------------------------------------------------ */
-/* LKL virtio-net callbacks (iovec-based)                             */
-/* ------------------------------------------------------------------ */
+/* LKL virtio-net callbacks (iovec-based). */
 
-/*
- * TX: LKL sends a packet.  Gather iovecs and write a length-prefixed
- * frame to the TX pipe.  The event loop thread reads it and calls
- * slirp_input (libslirp is NOT thread-safe, all access must be
- * serialized on the event loop thread).
+/* TX: LKL sends a packet.  Gather iovecs and write a length-prefixed frame to
+ * the TX pipe. The event loop thread reads it and calls slirp_input (libslirp
+ * is NOT thread-safe, all access must be serialized on the event loop thread).
  *
  * Called from LKL kernel context (single TX thread).
  */
@@ -696,17 +661,16 @@ static int net_tx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
     return 0;
 }
 
-/*
- * RX: LKL polls for incoming packets.
- * Read a length-prefixed frame from the RX pipe, scatter into iovecs.
- * This blocks until a frame is available (LKL calls this from its
- * internal thread when it needs a packet).
+/* RX: LKL polls for incoming packets.
+ * Read a length-prefixed frame from the RX pipe, scatter into iovecs. This
+ * blocks until a frame is available (LKL calls this from its internal thread
+ * when it needs a packet).
  */
-/*
- * RX: pop one packet from the queue, scatter into iovecs.
+
+/* RX: pop one packet from the queue, scatter into iovecs.
  *
- * Called with LKL's BKL held.  Returns instantly because the
- * rx_reader_thread already buffered the packet in the ring.
+ * Called with LKL's BKL held.  Returns instantly because the rx_reader_thread
+ * already buffered the packet in the ring.
  */
 static int net_rx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
 {
@@ -714,9 +678,11 @@ static int net_rx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
 
     unsigned head = __atomic_load_n(&rx_head, __ATOMIC_ACQUIRE);
     unsigned tail = __atomic_load_n(&rx_tail, __ATOMIC_RELAXED);
+    /* no data: must return -1, not 0 (0-byte completion triggers infinite
+     * kworker refill loop in LKL)
+     */
     if (head == tail)
-        return -1; /* no data: must return -1, not 0 (0-byte completion
-                    * triggers infinite kworker refill loop in LKL) */
+        return -1;
 
     struct rx_packet *pkt = &rx_queue[tail];
     uint16_t pkt_len = pkt->len;
@@ -734,23 +700,21 @@ static int net_rx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
     return (int) copied;
 }
 
-/*
- * Poll: check if RX data is available in the queue.
+/* Poll: check if RX data is available in the queue.
  *
- * Called with LKL's BKL held.  If the queue is empty, sleep briefly
- * on the eventfd (50ms) so the thread doesn't busy-spin.  The short
- * timeout ensures the BKL is released periodically so other LKL
- * threads (lkl_if_up, socket operations) can make progress.
+ * Called with LKL's BKL held. If the queue is empty, sleep briefly on eventfd
+ * (50ms) so the thread doesn't busy-spin. The short timeout ensures the BKL is
+ * released periodically so other LKL threads (lkl_if_up, socket operations) can
+ * make progress.
  */
 static int net_poll(struct lkl_netdev *nd)
 {
     (void) nd;
 
-    /*
-     * Gate: sleep until post-boot configuration completes.
-     * The poll thread is started by lkl_netdev_add (pre-boot).
-     * If it runs virtio_process_queue before lkl_if_up finishes,
-     * the kworker refill path can starve lkl_cpu_get callers.
+    /* Gate: sleep until post-boot configuration completes.
+     * The poll thread is started by lkl_netdev_add (pre-boot). If it runs
+     * virtio_process_queue before lkl_if_up finishes, the kworker refill path
+     * can starve lkl_cpu_get callers.
      */
     if (!__atomic_load_n(&net_ready, __ATOMIC_ACQUIRE)) {
         usleep(50000);
@@ -777,8 +741,7 @@ static int net_poll(struct lkl_netdev *nd)
     return flags;
 }
 
-/*
- * Poll HUP: wake the poll callback by writing to the RX pipe.
+/* Poll HUP: wake the poll callback by writing to the RX pipe.
  * LKL calls this to interrupt a blocking poll.
  */
 static void net_poll_hup(struct lkl_netdev *nd)
@@ -794,8 +757,7 @@ static void net_free(struct lkl_netdev *nd)
     (void) nd;
 }
 
-/*
- * Drain the TX pipe: read length-prefixed frames and feed them to SLIRP.
+/* Drain the TX pipe: read length-prefixed frames and feed them to SLIRP.
  * Must be called from the event loop thread (libslirp is not thread-safe).
  */
 static void drain_tx_pipe(void)
@@ -831,9 +793,7 @@ static void drain_tx_pipe(void)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* SLIRP event loop thread                                            */
-/* ------------------------------------------------------------------ */
+/* SLIRP event loop thread. */
 
 static void *slirp_event_loop(void *arg)
 {
@@ -890,10 +850,9 @@ static void *slirp_event_loop(void *arg)
                 ;
         }
 
-        /*
-         * Drain TX pipe: forward LKL-originated packets to SLIRP.
-         * This is the only place slirp_input is called, ensuring
-         * all libslirp access is serialized on this thread.
+        /* Drain TX pipe: forward LKL-originated packets to SLIRP. This is the
+         * only place slirp_input is called, ensuring all libslirp access is
+         * serialized on this thread.
          */
         drain_tx_pipe();
 
@@ -910,17 +869,14 @@ static void *slirp_event_loop(void *arg)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public API                                                         */
-/* ------------------------------------------------------------------ */
+/* Public API. */
 
-/*
- * Pre-boot device registration.
+/* Pre-boot device registration.
  *
- * LKL requires netdev to be registered BEFORE lkl_start_kernel.
- * The kernel probes the device during boot; registering after boot
- * causes deadlocks because the async probe thread holds the kernel
- * lock while the caller tries to do ioctl-based configuration.
+ * LKL requires netdev to be registered BEFORE lkl_start_kernel. The kernel
+ * probes the device during boot; registering after boot causes deadlocks
+ * because the async probe thread holds the kernel lock while the caller tries
+ * to do ioctl-based configuration.
  */
 int kbox_net_add_device(void)
 {
@@ -942,7 +898,8 @@ int kbox_net_add_device(void)
     fcntl(wakeup_pipe[0], F_SETFL, O_NONBLOCK);
     fcntl(wakeup_pipe[1], F_SETFL, O_NONBLOCK);
     /* tx_pipe[0] stays blocking: drain_tx_pipe must read complete
-     * length-prefixed frames atomically. */
+     * length-prefixed frames atomically.
+     */
 
     memset(shadow_sockets, 0, sizeof(shadow_sockets));
 
@@ -1037,13 +994,11 @@ err_rx_pipe:
     return -1;
 }
 
-
-/*
- * Post-boot interface configuration.
+/* Post-boot interface configuration.
  *
- * The poll thread is gated (blocked in ops->poll) so the LKL CPU is
- * uncontested.  Configure the interface synchronously, then open the
- * gate to let the poll thread start normal operation.
+ * The poll thread is gated (blocked in ops->poll) so LKL CPU is uncontested.
+ * Configure the interface synchronously, then open the gate to let the poll
+ * thread start normal operation.
  */
 int kbox_net_configure(const struct kbox_sysnrs *sysnrs)
 {
@@ -1058,18 +1013,17 @@ int kbox_net_configure(const struct kbox_sysnrs *sysnrs)
         kbox_lkl_close(sysnrs, fd);
     }
 
-    /*
-     * Configure the interface using ioctl-based API via raw lkl_syscall.
-     * The ioctl path (SIOCSIFADDR) creates connected routes synchronously
-     * via fib_add_ifaddr, unlike the netlink RTM_NEWADDR path which may
-     * defer route creation in LKL.
+    /* Configure the interface using ioctl-based API via raw lkl_syscall. The
+     * ioctl path (SIOCSIFADDR) creates connected routes synchronously via
+     * fib_add_ifaddr, unlike the netlink RTM_NEWADDR path which may defer route
+     * creation in LKL.
      *
      * Sequence: UP -> SIOCSIFADDR -> SIOCSIFNETMASK -> SIOCADDRT (gateway)
      * All done with the poll thread gated to avoid BKL contention.
      *
-     * NR 29 is __lkl__NR_ioctl from asm-generic/unistd.h.  LKL always
-     * uses the asm-generic ABI regardless of host architecture (x86_64
-     * host ioctl is NR 16, but lkl_syscall uses the LKL-internal table).
+     * NR 29 is __lkl__NR_ioctl from asm-generic/unistd.h. LKL always uses the
+     * asm-generic ABI regardless of host architecture (x86_64 host ioctl is NR
+     * 16, but lkl_syscall uses the LKL-internal table).
      */
 #define LKL_NR_IOCTL 29
     long sock = kbox_lkl_socket(sysnrs, 2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0);
@@ -1161,6 +1115,7 @@ int kbox_net_configure(const struct kbox_sysnrs *sysnrs)
     rt.rt_dst.sa_family = AF_INET;
     rt.rt_genmask.sa_family = AF_INET;
     rt.rt_gateway.sa_family = AF_INET;
+
     /* Gateway address at offset 2 in sockaddr_in (after sa_family). */
     inet_pton(AF_INET, GATEWAY_IP_STR, &rt.rt_gateway.sa_data[2]);
     rt.rt_flags = 0x0003; /* RTF_UP | RTF_GATEWAY */
@@ -1172,8 +1127,9 @@ int kbox_net_configure(const struct kbox_sysnrs *sysnrs)
         return -1;
     }
 
-    /* Don't close the socket here -- close(socket) after SIOCSIFFLAGS
-     * can deadlock on rtnl_lock. Leak is acceptable. */
+    /* Don't close socket here; close(socket) after SIOCSIFFLAGS can deadlock on
+     * rtnl_lock. Leak is acceptable.
+     */
 
     fprintf(stderr, "kbox: net: initialized (%s/%d gw %s dns %s)\n",
             GUEST_IP_STR, GUEST_MASK, GATEWAY_IP_STR, DNS_IP_STR);
@@ -1240,9 +1196,10 @@ int kbox_net_is_active(void)
 
 int kbox_net_register_socket(int lkl_fd, int supervisor_fd, int sock_type)
 {
-    /* Reserve a slot synchronously under the lock.  This prevents the
-     * race where multiple callers see the same free slot before the
-     * event loop drains the command pipe. */
+    /* Reserve a slot synchronously under the lock. This prevents the race where
+     * multiple callers see the same free slot before the event loop drains the
+     * command pipe.
+     */
     int reserved = 0;
     pthread_mutex_lock(&shadow_lock);
     for (int i = 0; i < MAX_SHADOW_SOCKETS; i++) {
@@ -1274,11 +1231,11 @@ int kbox_net_register_socket(int lkl_fd, int supervisor_fd, int sock_type)
 void kbox_net_deregister_socket(int lkl_fd)
 {
     /* Close supervisor_fd and mark inactive under the lock.
-     * If the event loop has this FD in its current pollfd[] snapshot,
-     * poll() sees POLLNVAL which is handled like POLLHUP (benign).
-     * This is safer than deferring the close, which lets
-     * register_socket reuse the slot before the FD is closed,
-     * permanently leaking the old descriptor. */
+     * If the event loop has this FD in its current pollfd[] snapshot, poll()
+     * sees POLLNVAL which is handled like POLLHUP (benign). This is safer than
+     * deferring the close, which lets register_socket reuse the slot before the
+     * FD is closed, permanently leaking the old descriptor.
+     */
     pthread_mutex_lock(&shadow_lock);
     for (int i = 0; i < MAX_SHADOW_SOCKETS; i++) {
         if (shadow_sockets[i].active && shadow_sockets[i].lkl_fd == lkl_fd) {
@@ -1298,7 +1255,7 @@ void kbox_net_deregister_socket(int lkl_fd)
 #else /* !KBOX_HAS_SLIRP */
 
 #include <stdio.h>
-#include "kbox/net.h"
+#include "net.h"
 
 int kbox_net_add_device(void)
 {

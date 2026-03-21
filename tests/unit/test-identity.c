@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdint.h>
 #include <string.h>
+
 #include "kbox/identity.h"
 #include "test-runner.h"
 

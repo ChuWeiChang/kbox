@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <string.h>
-#include "kbox/fd-table.h"
+
+#include "fd-table.h"
 #include "test-runner.h"
 
 static void test_fd_table_init_zeros(void)

@@ -10,15 +10,8 @@
  *
  */
 
-#include "kbox/fd-table.h"
-#include "kbox/seccomp.h"
-#include "kbox/syscall-nr.h"
-#ifdef KBOX_HAS_WEB
-#include "kbox/web.h"
-#endif
-
 #include <errno.h>
-/* seccomp types via kbox/seccomp.h -> kbox/seccomp-defs.h */
+/* seccomp types via seccomp.h -> seccomp-defs.h */
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -30,14 +23,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "fd-table.h"
+#include "seccomp.h"
+#include "syscall-nr.h"
+#ifdef KBOX_HAS_WEB
+#include "web.h"
+#endif
+
 /*
  * Notification types (kbox_seccomp_notif etc.) are provided by
- * kbox/seccomp-defs.h via kbox/seccomp.h.
+ * seccomp-defs.h via seccomp.h.
  */
 
-/* ------------------------------------------------------------------ */
-/* SCM_RIGHTS helpers                                                  */
-/* ------------------------------------------------------------------ */
+/* SCM_RIGHTS helpers. */
 
 /*
  * Create a UNIX socketpair.
@@ -90,9 +88,15 @@ static int send_fd(int sock, int fd)
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
 
-    if (sendmsg(sock, &msg, 0) < 0) {
-        fprintf(stderr, "sendmsg(SCM_RIGHTS): %s\n", strerror(errno));
-        return -1;
+    {
+        ssize_t sret;
+        do {
+            sret = sendmsg(sock, &msg, 0);
+        } while (sret < 0 && errno == EINTR);
+        if (sret < 0) {
+            fprintf(stderr, "sendmsg(SCM_RIGHTS): %s\n", strerror(errno));
+            return -1;
+        }
     }
     return 0;
 }
@@ -127,7 +131,9 @@ static int recv_fd(int sock)
     msg.msg_control = cmsg_buf.buf;
     msg.msg_controllen = sizeof(cmsg_buf.buf);
 
-    n = recvmsg(sock, &msg, 0);
+    do {
+        n = recvmsg(sock, &msg, 0);
+    } while (n < 0 && errno == EINTR);
     if (n < 0) {
         fprintf(stderr, "recvmsg(SCM_RIGHTS): %s\n", strerror(errno));
         return -1;
@@ -155,11 +161,9 @@ static int recv_fd(int sock)
     return fd;
 }
 
-/* ------------------------------------------------------------------ */
-/* Build a seccomp_notif_resp from a dispatch result.                  */
-/* ------------------------------------------------------------------ */
+/* Build a seccomp_notif_resp from a dispatch result. */
 
-/* KBOX_NOTIF_FLAG_CONTINUE from kbox/seccomp-defs.h */
+/* KBOX_NOTIF_FLAG_CONTINUE from seccomp-defs.h */
 
 static void build_response(struct kbox_seccomp_notif_resp *resp,
                            uint64_t id,
@@ -188,9 +192,7 @@ static void build_response(struct kbox_seccomp_notif_resp *resp,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Child wait helper                                                   */
-/* ------------------------------------------------------------------ */
+/* Child wait helper. */
 
 /*
  * Check child status via non-blocking waitpid.
@@ -221,9 +223,7 @@ static int check_child(pid_t pid, int *exit_code)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Supervisor loop                                                     */
-/* ------------------------------------------------------------------ */
+/* Supervisor loop. */
 
 /*
  * Sit in a poll loop:
@@ -268,8 +268,11 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
         if (ret == 0) {
 #ifdef KBOX_HAS_WEB
             /* Timer-driven telemetry sampling on poll timeout. */
-            if (ctx->web)
+            if (ctx->web) {
+                kbox_web_set_fd_used(ctx->web,
+                                     kbox_fd_table_count(ctx->fd_table));
                 kbox_web_tick(ctx->web);
+            }
 #endif
             continue;
         }
@@ -337,7 +340,7 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
              * ENOENT: tracee died between recv and send.
              * EBADF: notification ID invalidated (thread exit
              *        in a multi-threaded guest).
-             * Both are harmless -- loop around, waitpid picks
+             * Both are harmless; loop around, waitpid picks
              * up the exit.
              */
             if (e == ENOENT || e == EBADF) {
@@ -353,9 +356,7 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Public entry point                                                  */
-/* ------------------------------------------------------------------ */
+/* Public entry point. */
 
 int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
                         const char *command,
@@ -398,7 +399,7 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
     }
 
     if (pid == 0) {
-        /* ---------- Child process ---------- */
+        /* Child process. */
         close(sp[0]);
 
         /*
@@ -425,7 +426,7 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
             setrlimit(RLIMIT_RTPRIO, &rtlim);
         }
 
-        /* 3a. No new privileges -- required for seccomp. */
+        /* 3a. No new privileges: required for seccomp. */
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
             fprintf(stderr, "prctl(PR_SET_NO_NEW_PRIVS): %s\n",
                     strerror(errno));
@@ -455,7 +456,7 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
         if (send_fd(sp[1], listener_fd) < 0)
             _exit(127);
 
-        /* 3d. Close socket and listener -- parent owns them now. */
+        /* 3d. Close socket and listener; parent owns them now. */
         close(sp[1]);
         close(listener_fd);
 
@@ -493,7 +494,7 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
         _exit(127);
     }
 
-    /* ---------- Parent process ---------- */
+    /* Parent process. */
     close(sp[1]);
 
     /* 4a. Receive listener FD from child. */

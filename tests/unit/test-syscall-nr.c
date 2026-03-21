@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#include "kbox/syscall-nr.h"
+
+#include "syscall-nr.h"
 #include "test-runner.h"
 
 static void test_x86_64_openat(void)

@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * seccomp-bpf.c - Build and install a seccomp-unotify BPF filter.
+
+/* Build and install a seccomp-unotify BPF filter.
  *
  * The BPF program has four sections:
- *   1. Arch check -- kill on wrong architecture
- *   2. Allow-list -- sendmsg, exit, exit_group bypass the supervisor
- *   3. Deny-list  -- dangerous syscalls return EPERM without reaching
- *                    the supervisor (seccomp manipulation, ptrace,
- *                    namespaces, io_uring, etc.)
- *   4. Default    -- everything else goes to USER_NOTIF
+ *   1. Arch check: kill on wrong architecture
+ *   2. Allow-list: sendmsg, exit, exit_group bypass the supervisor
+ *   3. Deny-list:  dangerous syscalls return EPERM without reaching the
+ *      supervisor (seccomp manipulation, ptrace, namespaces, io_uring, etc.)
+ *   4. Default:    everything else goes to USER_NOTIF
  *
  * The deny list prevents the guest from:
  *   - Installing its own seccomp filters (breaking CONTINUE)
@@ -23,8 +22,6 @@
  *   - prlimit64: dispatch validates GET vs SET
  */
 
-#include "kbox/seccomp.h"
-
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,44 +29,44 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
-/* Deny list: arch-specific syscall numbers                           */
-/* ------------------------------------------------------------------ */
+#include "seccomp.h"
+
+/* Deny list: arch-specific syscall numbers. */
 
 #if defined(__x86_64__)
 static const int deny_nrs[] = {
-    /* Seccomp manipulation -- guest can install filters breaking CONTINUE */
+    /* Seccomp manipulation:guest can install filters breaking CONTINUE */
     317, /* seccomp */
 
-    /* Tracing -- supervisor memory/process access attacks */
+    /* Tracing:supervisor memory/process access attacks */
     101, /* ptrace */
     311, /* process_vm_writev */
     440, /* process_madvise */
     448, /* process_mrelease */
 
-    /* Landlock -- guest can restrict CONTINUE operations */
+    /* Landlock:guest can restrict CONTINUE operations */
     444, /* landlock_create_ruleset */
     445, /* landlock_add_rule */
     446, /* landlock_restrict_self */
 
-    /* System admin -- reboot, hostname manipulation */
+    /* System admin:reboot, hostname manipulation */
     169, /* reboot */
     170, /* sethostname */
     171, /* setdomainname */
     163, /* acct */
 
-    /* Kernel modules -- code injection */
+    /* Kernel modules:code injection */
     175, /* init_module */
     313, /* finit_module */
     176, /* delete_module */
     246, /* kexec_load */
     320, /* kexec_file_load */
 
-    /* BPF/perf -- kernel tracing and manipulation */
+    /* BPF/perf:kernel tracing and manipulation */
     321, /* bpf */
     298, /* perf_event_open */
 
-    /* Namespaces -- container escape */
+    /* Namespaces:container escape */
     272, /* unshare */
     308, /* setns */
 
@@ -82,7 +79,7 @@ static const int deny_nrs[] = {
     135, /* personality */
     312, /* kcmp */
 
-    /* io_uring -- bypasses seccomp entirely */
+    /* io_uring:bypasses seccomp entirely */
     425, /* io_uring_setup */
     426, /* io_uring_enter */
     427, /* io_uring_register */
@@ -91,9 +88,9 @@ static const int deny_nrs[] = {
     323, /* userfaultfd */
     434, /* pidfd_open */
     438, /* pidfd_getfd */
-    447, /* memfd_secret -- breaks process_vm_readv */
+    447, /* memfd_secret:breaks process_vm_readv */
 
-    /* New mount API -- host namespace manipulation */
+    /* New mount API:host namespace manipulation */
     428, /* open_tree */
     429, /* move_mount */
     430, /* fsopen */
@@ -214,8 +211,7 @@ static const int deny_nrs[] = {
 
     /* Filesystem monitoring */
     262, /* fanotify_init */
-    263, /* fanotify_mark -- note: shares NR with name_to_handle_at on some
-            kernels */
+    263, /* fanotify_mark: shares NR with name_to_handle_at on some kernels */
 
     /* Quota */
     -1,  /* quotactl (not on aarch64) */
@@ -249,10 +245,9 @@ static const int deny_nrs[] = {
 #define DENY_COUNT ((int) (sizeof(deny_nrs) / sizeof(deny_nrs[0])))
 #define ALLOW_COUNT 3
 
-/*
- * Maximum BPF program length.  Each deny entry is 2 instructions
- * (compare + ret_errno), each allow entry is 2 instructions.
- * Plus 4 for arch check + 1 for default.
+/* Maximum BPF program length. Each deny entry is 2 instructions (compare +
+ * ret_errno), each allow entry is 2 instructions. Plus 4 for arch check + 1 for
+ * default.
  *
  * Use a generous upper bound for the VLA.
  */
@@ -283,8 +278,7 @@ int kbox_install_seccomp_listener(const struct kbox_host_nrs *h)
     filter[idx++] = (struct kbox_sock_filter) KBOX_BPF_STMT(
         KBOX_BPF_LD | KBOX_BPF_W | KBOX_BPF_ABS, KBOX_SECCOMP_DATA_NR_OFFSET);
 
-    /*
-     * Allow-list: sendmsg, exit, exit_group.
+    /* Allow-list: sendmsg, exit, exit_group.
      * These bypass the supervisor entirely.
      */
 #define EMIT_ALLOW(nr)                                             \
@@ -295,29 +289,26 @@ int kbox_install_seccomp_listener(const struct kbox_host_nrs *h)
             KBOX_BPF_RET | KBOX_BPF_K, KBOX_SECCOMP_RET_ALLOW);    \
     } while (0)
 
-    /*
-     * sendmsg MUST stay allow-listed: the child's pre-exec FD transfer
-     * uses sendmsg(SCM_RIGHTS) before the supervisor loop starts.
-     * Removing it deadlocks the child/parent handshake.
+    /* sendmsg MUST stay allow-listed: the child's pre-exec FD transfer uses
+     * sendmsg(SCM_RIGHTS) before the supervisor loop starts. Removing it
+     * deadlocks the child/parent handshake.
      *
-     * Consequence: guest sendmsg() on shadow sockets bypasses the
-     * supervisor and operates on the AF_UNIX socketpair, losing
-     * msg_name addressing.  Callers that need addressed datagrams
-     * must use sendto() (intercepted via forward_sendto).
-     * recvmsg() IS intercepted and returns correct source addresses.
+     * Consequence: guest sendmsg() on shadow sockets bypasses the supervisor
+     * and operates on the AF_UNIX socketpair, losing msg_name addressing.
+     * Callers that need addressed datagrams must use sendto() (intercepted via
+     * forward_sendto). recvmsg() IS intercepted and returns correct source
+     * addresses.
      *
-     * To fix: restructure supervisor startup to pass the listener FD
-     * via pidfd_getfd or /proc/<pid>/fd instead of SCM_RIGHTS.
+     * To fix: restructure supervisor startup to pass the listener FD via
+     * pidfd_getfd or /proc/<pid>/fd instead of SCM_RIGHTS.
      */
     EMIT_ALLOW(h->sendmsg);
     EMIT_ALLOW(h->exit);
     EMIT_ALLOW(h->exit_group);
 #undef EMIT_ALLOW
 
-    /*
-     * Deny-list: dangerous syscalls get EPERM without reaching
-     * the supervisor.  Skip entries with nr == -1 (not available
-     * on this architecture).
+    /* Deny-list: dangerous syscalls get EPERM without reaching the supervisor.
+     * Skip entries with nr == -1 (not available on this architecture).
      */
     for (i = 0; i < DENY_COUNT; i++) {
         if (deny_nrs[i] < 0)

@@ -7,13 +7,9 @@
  * runs all registered tests.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "test-runner.h"
 
 #define MAX_TESTS 256
-
-typedef void (*test_fn)(void);
 
 struct test_entry {
     const char *name;
@@ -24,7 +20,6 @@ static struct test_entry tests[MAX_TESTS];
 static int test_count;
 static int pass_count;
 static int fail_count;
-static const char *current_test;
 
 void test_register(const char *name, test_fn fn)
 {
@@ -43,60 +38,39 @@ void test_fail(const char *file, int line, const char *expr)
     fail_count++;
 }
 
+void test_fail_eq_long(const char *file,
+                       int line,
+                       const char *lhs,
+                       const char *rhs,
+                       long a,
+                       long b)
+{
+    fprintf(stderr, "  FAIL: %s:%d: %s == %s (%ld != %ld)\n", file, line, lhs,
+            rhs, a, b);
+    fail_count++;
+}
+
+void test_fail_ne_long(const char *file,
+                       int line,
+                       const char *lhs,
+                       const char *rhs,
+                       long a)
+{
+    fprintf(stderr, "  FAIL: %s:%d: %s != %s (both %ld)\n", file, line, lhs,
+            rhs, a);
+    fail_count++;
+}
+
+void test_fail_streq(const char *file, int line, const char *a, const char *b)
+{
+    fprintf(stderr, "  FAIL: %s:%d: \"%s\" != \"%s\"\n", file, line, a, b);
+    fail_count++;
+}
+
 void test_pass(void)
 {
     pass_count++;
 }
-
-#define ASSERT_TRUE(expr)                         \
-    do {                                          \
-        if (!(expr)) {                            \
-            test_fail(__FILE__, __LINE__, #expr); \
-            return;                               \
-        }                                         \
-        test_pass();                              \
-    } while (0)
-
-#define ASSERT_EQ(a, b)                                               \
-    do {                                                              \
-        long _a = (long) (a), _b = (long) (b);                        \
-        if (_a != _b) {                                               \
-            fprintf(stderr, "  FAIL: %s:%d: %s == %s (%ld != %ld)\n", \
-                    __FILE__, __LINE__, #a, #b, _a, _b);              \
-            fail_count++;                                             \
-            return;                                                   \
-        }                                                             \
-        test_pass();                                                  \
-    } while (0)
-
-#define ASSERT_NE(a, b)                                                       \
-    do {                                                                      \
-        long _a = (long) (a), _b = (long) (b);                                \
-        if (_a == _b) {                                                       \
-            fprintf(stderr, "  FAIL: %s:%d: %s != %s (both %ld)\n", __FILE__, \
-                    __LINE__, #a, #b, _a);                                    \
-            fail_count++;                                                     \
-            return;                                                           \
-        }                                                                     \
-        test_pass();                                                          \
-    } while (0)
-
-#define ASSERT_STREQ(a, b)                                                 \
-    do {                                                                   \
-        const char *_a = (a), *_b = (b);                                   \
-        if (strcmp(_a, _b) != 0) {                                         \
-            fprintf(stderr, "  FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, \
-                    __LINE__, _a, _b);                                     \
-            fail_count++;                                                  \
-            return;                                                        \
-        }                                                                  \
-        test_pass();                                                       \
-    } while (0)
-
-#define TEST_REGISTER(fn) test_register(#fn, fn)
-
-/* Include the shared test header for all test files */
-#include "test-runner.h"
 
 /* External init functions from each test file */
 extern void test_fd_table_init(void);
@@ -121,11 +95,11 @@ int main(int argc, char *argv[])
     int suite_fails = 0;
     printf("Running %d tests...\n", test_count);
     for (int i = 0; i < test_count; i++) {
-        current_test = tests[i].name;
         int before_fail = fail_count;
         printf("  [%d/%d] %s... ", i + 1, test_count, tests[i].name);
         fflush(stdout);
         tests[i].fn();
+        /* cppcheck-suppress knownConditionTrueFalse */
         if (fail_count > before_fail) {
             suite_fails++;
             printf("FAILED\n");

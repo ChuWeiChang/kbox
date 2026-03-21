@@ -133,7 +133,7 @@ check_required_tools() {
 printf "${CYAN}Running pre-commit checks...${NC}\n\n"
 check_required_tools
 
-CPPCHECK_OPTS="-I. -Iinclude --enable=all --error-exitcode=1"
+CPPCHECK_OPTS="-I. -Iinclude -Isrc --enable=all --error-exitcode=1"
 CPPCHECK_OPTS+=" $(detect_cc_std)"
 CPPCHECK_OPTS+=" --force $(cppcheck_suppressions)"
 CPPCHECK_OPTS+=" -D_GNU_SOURCE -DKBOX_UNIT_TEST"

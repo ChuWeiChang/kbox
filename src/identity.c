@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: MIT */
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "kbox/identity.h"
-#include "kbox/lkl-wrap.h"
+#include "lkl-wrap.h"
 
-/*
- * djb2 hash -- deterministic username-to-uid mapping.
+/* djb2 hash: deterministic username-to-uid mapping.
  * Produces a 32-bit hash; the caller reduces it modulo the desired range.
  */
 uint32_t kbox_hash_username(const char *name)
@@ -19,9 +19,7 @@ uint32_t kbox_hash_username(const char *name)
     return hash;
 }
 
-/*
- * Helper: return true if |path| equals |exact| or starts with |prefix/|.
- */
+/* return true if |path| equals |exact| or starts with |prefix/|. */
 static bool match_prefix(const char *path, const char *prefix)
 {
     size_t len = strlen(prefix);
@@ -31,8 +29,7 @@ static bool match_prefix(const char *path, const char *prefix)
     return path[len] == '\0' || path[len] == '/';
 }
 
-/*
- * Helper: extract the basename (last component) from a path.
+/* Extract the basename (last component) from a path.
  * Returns a pointer into |path| itself.
  */
 static const char *basename_of(const char *path)
@@ -41,9 +38,7 @@ static const char *basename_of(const char *path)
     return p ? p + 1 : path;
 }
 
-/*
- * Check if a basename matches any of the well-known setuid binaries.
- */
+/* Check if a basename matches any of the well-known setuid binaries. */
 static bool is_setuid_binary(const char *base)
 {
     static const char *const setuid_bins[] = {
@@ -58,8 +53,7 @@ static bool is_setuid_binary(const char *base)
     return false;
 }
 
-/*
- * Extract the third component from a path like "/home/user".
+/* Extract the third component from a path like "/home/user".
  * Writes into |buf| (up to |sz| bytes including NUL).
  * Returns false if the path does not have exactly 3 components.
  */
@@ -68,6 +62,7 @@ static bool extract_username(const char *path, char *buf, size_t sz)
     /* Must start with "/home/" */
     if (strncmp(path, "/home/", 6) != 0)
         return false;
+
     const char *user = path + 6;
     /* Must not contain another slash and must not be empty */
     if (*user == '\0' || strchr(user, '/') != NULL)
@@ -87,7 +82,7 @@ bool kbox_normalized_permissions(const char *path,
     if (!path || !mode || !uid || !gid)
         return false;
 
-    /* /tmp -- sticky + world-writable */
+    /* /tmp: sticky + world-writable */
     if (strcmp(path, "/tmp") == 0) {
         *mode = 01777;
         *uid = 0;
@@ -95,7 +90,7 @@ bool kbox_normalized_permissions(const char *path,
         return true;
     }
 
-    /* /proc, /sys -- read-only traversal */
+    /* /proc, /sys: read-only traversal */
     if (strcmp(path, "/proc") == 0 || strcmp(path, "/sys") == 0) {
         *mode = 0555;
         *uid = 0;

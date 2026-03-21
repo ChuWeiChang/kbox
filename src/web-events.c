@@ -12,15 +12,13 @@
 
 #ifdef KBOX_HAS_WEB
 
-#include "kbox/web.h"
-
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Ring buffer                                                         */
-/* ------------------------------------------------------------------ */
+#include "web.h"
+
+/* Ring buffer. */
 
 void kbox_event_ring_init(struct kbox_event_ring *ring)
 {
@@ -53,11 +51,9 @@ static void ring_push_error(struct kbox_event_ring *ring,
     ring->error_head = (ring->error_head + 1) % KBOX_EVENT_RING_ERROR;
 }
 
-/* ------------------------------------------------------------------ */
-/* Sampling policy                                                     */
-/* ------------------------------------------------------------------ */
+/* Sampling policy. */
 
-/* Simple PRNG (xorshift32) -- no need for crypto quality */
+/* Simple PRNG (xorshift32); no need for crypto quality. */
 static uint32_t xorshift32(uint32_t *state)
 {
     uint32_t x = *state;
@@ -108,9 +104,7 @@ static int should_sample(const struct kbox_syscall_event *evt,
     return (xorshift32(rng_state) % 100) < (uint32_t) sample_pct;
 }
 
-/* ------------------------------------------------------------------ */
-/* Event emission                                                      */
-/* ------------------------------------------------------------------ */
+/* Event emission. */
 
 void kbox_event_push_syscall(struct kbox_event_ring *ring,
                              uint32_t *rng_state,
@@ -137,19 +131,8 @@ void kbox_event_push_syscall(struct kbox_event_ring *ring,
     ring_push_routine(ring, &e);
 }
 
-void kbox_event_push_process(struct kbox_event_ring *ring,
-                             const struct kbox_process_event *evt)
-{
-    /* Process events are always rare -- push to error ring */
-    struct kbox_event e;
-    e.type = KBOX_EVT_PROCESS;
-    e.process = *evt;
-    ring_push_error(ring, &e);
-}
 
-/* ------------------------------------------------------------------ */
-/* JSON string escaping                                                */
-/* ------------------------------------------------------------------ */
+/* JSON string escaping. */
 
 /*
  * Escape a string for safe JSON embedding.
@@ -180,9 +163,7 @@ static int json_escape(const char *src, char *dst, int dstsz)
     return pos;
 }
 
-/* ------------------------------------------------------------------ */
-/* Event JSON serialization                                            */
-/* ------------------------------------------------------------------ */
+/* Event JSON serialization. */
 
 int kbox_event_to_json(const struct kbox_event *evt, char *buf, int bufsz)
 {
@@ -209,30 +190,6 @@ int kbox_event_to_json(const struct kbox_event *evt, char *buf, int bufsz)
                         e->syscall_name ? e->syscall_name : "?", dname,
                         e->return_value, e->error_nr, e->latency_ns);
     }
-    case KBOX_EVT_PROCESS: {
-        const struct kbox_process_event *e = &evt->process;
-        if (e->is_exit)
-            return snprintf(buf, (size_t) bufsz,
-                            "{\"type\":\"process\","
-                            "\"ts\":%" PRIu64
-                            ","
-                            "\"pid\":%u,"
-                            "\"action\":\"exit\","
-                            "\"code\":%d}",
-                            e->timestamp_ns, e->pid, e->exit_code);
-        char escaped_cmd[256];
-        json_escape(e->command, escaped_cmd, sizeof(escaped_cmd));
-        return snprintf(buf, (size_t) bufsz,
-                        "{\"type\":\"process\","
-                        "\"ts\":%" PRIu64
-                        ","
-                        "\"pid\":%u,"
-                        "\"action\":\"exec\","
-                        "\"cmd\":\"%s\"}",
-                        e->timestamp_ns, e->pid, escaped_cmd);
-    }
-    case KBOX_EVT_COUNTER_DELTA:
-        return snprintf(buf, (size_t) bufsz, "{\"type\":\"counter_delta\"}");
     }
     return 0;
 }

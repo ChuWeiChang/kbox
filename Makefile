@@ -9,7 +9,7 @@ BUILD    ?= debug
 
 CFLAGS  += -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Wshadow
 CFLAGS  += -Wno-unused-parameter
-CFLAGS  += -Iinclude
+CFLAGS  += -Iinclude -Isrc
 
 ifeq ($(BUILD),release)
   CFLAGS  += -O2 -DNDEBUG
@@ -44,7 +44,6 @@ endif
 SRC_DIR  = src
 SRCS     = $(SRC_DIR)/main.c \
            $(SRC_DIR)/cli.c \
-           $(SRC_DIR)/util.c \
            $(SRC_DIR)/syscall-nr.c \
            $(SRC_DIR)/lkl-wrap.c \
            $(SRC_DIR)/fd-table.c \
@@ -90,8 +89,7 @@ TEST_SUPPORT_SRCS = $(SRC_DIR)/fd-table.c \
                     $(SRC_DIR)/path.c \
                     $(SRC_DIR)/identity.c \
                     $(SRC_DIR)/syscall-nr.c \
-                    $(SRC_DIR)/elf.c \
-                    $(SRC_DIR)/util.c
+                    $(SRC_DIR)/elf.c
 
 TEST_OBJS    = $(TEST_SRCS:.c=.o) $(TEST_SUPPORT_SRCS:.c=.o)
 TEST_TARGET  = tests/unit/test-runner
@@ -228,14 +226,14 @@ clean:
 # Auto-generate with gcc -MM if needed; keep it simple for now.
 $(SRC_DIR)/main.o: include/kbox/cli.h include/kbox/image.h
 $(SRC_DIR)/cli.o: include/kbox/cli.h
-$(SRC_DIR)/probe.o: include/kbox/probe.h include/kbox/seccomp-defs.h
-$(SRC_DIR)/image.o: include/kbox/image.h include/kbox/lkl-wrap.h include/kbox/mount.h include/kbox/net.h include/kbox/identity.h include/kbox/probe.h include/kbox/seccomp.h
-$(SRC_DIR)/shadow-fd.o: include/kbox/shadow-fd.h include/kbox/lkl-wrap.h include/kbox/syscall-nr.h
-$(SRC_DIR)/seccomp-dispatch.o: include/kbox/seccomp.h include/kbox/seccomp-defs.h include/kbox/fd-table.h include/kbox/lkl-wrap.h include/kbox/procmem.h include/kbox/path.h include/kbox/identity.h include/kbox/shadow-fd.h include/kbox/net.h
-$(SRC_DIR)/seccomp-supervisor.o: include/kbox/seccomp.h include/kbox/seccomp-defs.h include/kbox/syscall-nr.h
-$(SRC_DIR)/seccomp-bpf.o: include/kbox/seccomp.h include/kbox/seccomp-defs.h include/kbox/syscall-nr.h
-$(SRC_DIR)/seccomp-notify.o: include/kbox/seccomp.h include/kbox/seccomp-defs.h
-$(SRC_DIR)/net-slirp.o: include/kbox/net.h include/kbox/lkl-wrap.h include/kbox/syscall-nr.h
-$(SRC_DIR)/web-telemetry.o: include/kbox/web.h include/kbox/lkl-wrap.h include/kbox/syscall-nr.h
-$(SRC_DIR)/web-events.o: include/kbox/web.h
-$(SRC_DIR)/web-server.o: include/kbox/web.h include/kbox/fd-table.h include/kbox/lkl-wrap.h include/kbox/syscall-nr.h
+$(SRC_DIR)/probe.o: include/kbox/probe.h src/seccomp-defs.h
+$(SRC_DIR)/image.o: include/kbox/image.h include/kbox/mount.h include/kbox/identity.h include/kbox/probe.h src/lkl-wrap.h src/net.h src/seccomp.h src/shadow-fd.h
+$(SRC_DIR)/shadow-fd.o: src/shadow-fd.h src/lkl-wrap.h src/syscall-nr.h
+$(SRC_DIR)/seccomp-dispatch.o: src/seccomp.h src/seccomp-defs.h src/fd-table.h src/lkl-wrap.h src/procmem.h include/kbox/path.h include/kbox/identity.h src/shadow-fd.h src/net.h
+$(SRC_DIR)/seccomp-supervisor.o: src/seccomp.h src/seccomp-defs.h src/syscall-nr.h
+$(SRC_DIR)/seccomp-bpf.o: src/seccomp.h src/seccomp-defs.h src/syscall-nr.h
+$(SRC_DIR)/seccomp-notify.o: src/seccomp.h src/seccomp-defs.h
+$(SRC_DIR)/net-slirp.o: src/net.h src/lkl-wrap.h src/syscall-nr.h
+$(SRC_DIR)/web-telemetry.o: src/web.h src/lkl-wrap.h src/syscall-nr.h
+$(SRC_DIR)/web-events.o: src/web.h
+$(SRC_DIR)/web-server.o: src/web.h src/fd-table.h src/lkl-wrap.h src/syscall-nr.h

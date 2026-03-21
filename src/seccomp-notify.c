@@ -9,12 +9,12 @@
  *
  */
 
-#include "kbox/seccomp.h"
-
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
+
+#include "seccomp.h"
 
 int kbox_notify_recv(int listener_fd, void *notif)
 {

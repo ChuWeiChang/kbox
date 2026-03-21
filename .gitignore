@@ -1,8 +1,8 @@
 *.o
+*.dSYM/
+*.ext4
 /kbox
 tests/unit/test-runner
-rootfs.ext4
-alpine.ext4
 deps/
 lkl-x86_64/
 lkl-aarch64/

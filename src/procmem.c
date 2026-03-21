@@ -1,12 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * procmem.c - Process memory access for seccomp-unotify.
- *
- * Wraps process_vm_readv/writev to read and write tracee memory
- * without ptrace.
- */
 
-#include "kbox/procmem.h"
+/* Process memory access for seccomp-unotify.
+ *
+ * Wraps process_vm_readv/writev to read/write tracee memory without ptrace.
+ */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -15,6 +12,8 @@
 #include <string.h>
 #include <sys/uio.h>
 #include <unistd.h>
+
+#include "procmem.h"
 
 int kbox_vm_read(pid_t pid, uint64_t remote_addr, void *out, size_t len)
 {
@@ -47,9 +46,8 @@ int kbox_vm_write(pid_t pid, uint64_t remote_addr, const void *in, size_t len)
     if (len == 0)
         return 0;
 
-    /*
-     * process_vm_writev takes a non-const iov_base, but we only read
-     * from the local buffer.  The cast is safe.
+    /* process_vm_writev takes a non-const iov_base, but we only read from the
+     * local buffer. The cast is safe.
      */
     local_iov.iov_base = (void *) (uintptr_t) in;
     local_iov.iov_len = len;
@@ -86,7 +84,7 @@ int kbox_vm_read_string(pid_t pid,
 
     n = process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
     if (n <= 0)
-        return -errno ? -errno : -EIO;
+        return errno ? -errno : -EIO;
 
     /* Find the NUL terminator within the bytes we actually read. */
     for (i = 0; i < (size_t) n; i++) {
@@ -94,12 +92,12 @@ int kbox_vm_read_string(pid_t pid,
             return (int) i;
     }
 
-    /*
-     * No NUL found in the read data.  Two possible reasons:
+    /* No NUL found in the read data. Two possible reasons:
      *   - Short read (page boundary): tracee memory is faulted.
      *   - Full read: path exceeds PATH_MAX.
-     * Either way, do not silently truncate -- a truncated path
-     * could resolve to an unintended file.
+     *
+     * Either way, do not silently truncate: a truncated path could resolve to
+     * an unintended file.
      */
     buf[0] = '\0';
     if ((size_t) n < max_len)

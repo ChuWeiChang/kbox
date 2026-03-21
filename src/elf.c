@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: MIT */
+
 #include <stdint.h>
 #include <string.h>
 
 #include "kbox/elf.h"
 
-/*
- * Little-endian readers.  Use memcpy to avoid unaligned access on
- * architectures that trap on it (ARMv7 without SCTLR.A clear, etc.).
+/* Little-endian readers. Use memcpy to avoid unaligned access on architectures
+ * that trap on it (ARMv7 without SCTLR.A clear, etc.).
  */
 static uint16_t read_le16(const unsigned char *p)
 {
@@ -65,65 +65,7 @@ int kbox_parse_elf_interp(const unsigned char *buf,
                           char *out,
                           size_t out_size)
 {
-    if (!buf || buf_len < MIN_ELF_HDR || !out || out_size == 0)
-        return -1;
-
-    /* Validate ELF magic */
-    if (memcmp(buf, elf_magic, 4) != 0)
-        return -1;
-
-    /* Must be 64-bit, little-endian */
-    if (buf[EI_CLASS] != ELFCLASS64 || buf[EI_DATA] != ELFDATA2LSB)
-        return -1;
-
-    uint64_t phoff = read_le64(buf + E_PHOFF_OFF);
-    uint16_t phentsize = read_le16(buf + E_PHENTSIZE_OFF);
-    uint16_t phnum = read_le16(buf + E_PHNUM_OFF);
-
-    if (phentsize < MIN_PHENTSIZE)
-        return -1;
-
-    for (uint16_t i = 0; i < phnum; i++) {
-        /* Overflow-safe offset calculation */
-        uint64_t off = phoff + (uint64_t) i * phentsize;
-        if (off + MIN_PHENTSIZE > buf_len)
-            break;
-
-        uint32_t p_type = read_le32(buf + off + P_TYPE_OFF);
-        if (p_type != PT_INTERP)
-            continue;
-
-        uint64_t p_offset = read_le64(buf + off + P_OFFSET_OFF);
-        uint64_t p_filesz = read_le64(buf + off + P_FILESZ_OFF);
-
-        if (p_offset >= buf_len)
-            return -1;
-
-        /* Overflow-safe clamp to available buffer */
-        uint64_t end;
-        if (__builtin_add_overflow(p_offset, p_filesz, &end) || end > buf_len)
-            end = buf_len;
-
-        const unsigned char *s = buf + p_offset;
-        size_t slen = (size_t) (end - p_offset);
-
-        /* Strip trailing NUL if present */
-        if (slen > 0 && s[slen - 1] == '\0')
-            slen--;
-
-        if (slen == 0)
-            return 0;
-
-        /* Copy to output, respecting buffer size */
-        if (slen >= out_size)
-            slen = out_size - 1;
-        memcpy(out, s, slen);
-        out[slen] = '\0';
-        return (int) slen;
-    }
-
-    /* No PT_INTERP found -- static binary */
-    return 0;
+    return kbox_find_elf_interp_loc(buf, buf_len, out, out_size, NULL, NULL);
 }
 
 int kbox_find_elf_interp_loc(const unsigned char *buf,

@@ -15,12 +15,6 @@
 
 #ifdef KBOX_HAS_WEB
 
-#include "kbox/web.h"
-
-#include "kbox/fd-table.h"
-#include "kbox/lkl-wrap.h"
-#include "kbox/syscall-nr.h"
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -34,12 +28,16 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
-/* Constants                                                           */
-/* ------------------------------------------------------------------ */
+#include "fd-table.h"
+#include "lkl-wrap.h"
+#include "syscall-nr.h"
+#include "web.h"
+
+/* Constants. */
 
 #define WEB_MAX_SSE_CLIENTS 8
 #define WEB_MAX_CLIENTS 32
@@ -53,9 +51,7 @@
 /* Snapshot ring buffer (last N minutes at 10 samples/sec) */
 #define SNAP_RING_SIZE 600 /* ~1 minute at 100ms */
 
-/* ------------------------------------------------------------------ */
-/* Web context                                                         */
-/* ------------------------------------------------------------------ */
+/* Web context. */
 
 struct kbox_sse_client {
     int fd;
@@ -92,47 +88,14 @@ struct kbox_web_ctx {
     struct kbox_sse_client sse_clients[WEB_MAX_SSE_CLIENTS];
     int sse_count;
 
+    /* FD table usage (set by supervisor via kbox_web_set_fd_used) */
+    uint32_t fd_used;
+
     /* Thread safety */
     pthread_mutex_t lock;
 };
 
-/* ---- Cross-module functions (web-telemetry.c, web-events.c) ---- */
-extern void kbox_event_ring_init(struct kbox_event_ring *ring);
-extern void kbox_event_push_syscall(struct kbox_event_ring *ring,
-                                    uint32_t *rng_state,
-                                    int sample_pct,
-                                    const struct kbox_syscall_event *evt);
-extern void kbox_event_push_process(struct kbox_event_ring *ring,
-                                    const struct kbox_process_event *evt);
-extern int kbox_event_to_json(const struct kbox_event *evt,
-                              char *buf,
-                              int bufsz);
-extern uint64_t kbox_event_ring_iterate(const struct kbox_event_ring *ring,
-                                        uint64_t from_seq,
-                                        void (*cb)(const struct kbox_event *evt,
-                                                   void *userdata),
-                                        void *userdata);
-extern void kbox_telemetry_sample(
-    const struct kbox_sysnrs *s,
-    struct kbox_telemetry_snapshot *snap,
-    uint64_t boot_time_ns,
-    uint32_t fd_used,
-    uint32_t fd_max,
-    const struct kbox_telemetry_counters *counters);
-extern int kbox_snapshot_to_json(const struct kbox_telemetry_snapshot *snap,
-                                 char *buf,
-                                 int bufsz);
-extern int kbox_stats_to_json(const struct kbox_telemetry_snapshot *snap,
-                              const char *guest_name,
-                              char *buf,
-                              int bufsz);
-extern int kbox_enosys_to_json(const struct kbox_telemetry_counters *c,
-                               char *buf,
-                               int bufsz);
-
-/* ------------------------------------------------------------------ */
-/* HTTP parsing                                                        */
-/* ------------------------------------------------------------------ */
+/* HTTP parsing. */
 
 struct http_request {
     char method[8];
@@ -165,9 +128,7 @@ static int parse_request_line(const char *line, struct http_request *req)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* HTTP responses                                                      */
-/* ------------------------------------------------------------------ */
+/* HTTP responses. */
 
 /*
  * Write all bytes to fd, handling partial writes.
@@ -226,6 +187,8 @@ static void send_response(int fd,
                            "Connection: close\r\n"
                            "\r\n",
                            status, status_text, content_type, body_len);
+    if (hdr_len < 0 || hdr_len >= (int) sizeof(hdr))
+        hdr_len = (int) sizeof(hdr) - 1;
 
     write_all(fd, hdr, (size_t) hdr_len);
     if (body_len > 0)
@@ -249,9 +212,7 @@ static void send_405(int fd)
     send_response(fd, 405, "application/json", body, (int) strlen(body));
 }
 
-/* ------------------------------------------------------------------ */
-/* SSE                                                                 */
-/* ------------------------------------------------------------------ */
+/* SSE. */
 
 static int start_sse(struct kbox_web_ctx *ctx, int fd)
 {
@@ -274,7 +235,7 @@ static int start_sse(struct kbox_web_ctx *ctx, int fd)
         return -1;
 
     /*
-     * Remove the FD from epoll -- SSE connections are managed
+     * Remove the FD from epoll; SSE connections are managed
      * exclusively by flush_sse_clients(), not the main read loop.
      * This prevents the main loop from closing the FD on a
      * subsequent read event (which could reuse the FD number).
@@ -305,11 +266,13 @@ static void sse_push_event(const struct kbox_event *evt, void *userdata)
     if (len <= 0)
         return;
 
-    const char *type = (evt->type == KBOX_EVT_SYSCALL) ? "syscall" : "process";
+    const char *type = "syscall";
 
     char sse_buf[2200];
     int sse_len = snprintf(sse_buf, sizeof(sse_buf), "event: %s\ndata: %s\n\n",
                            type, json);
+    if (sse_len < 0 || sse_len >= (int) sizeof(sse_buf))
+        sse_len = (int) sizeof(sse_buf) - 1;
 
     if (write(pc->fd, sse_buf, (size_t) sse_len) < 0)
         pc->failed = 1;
@@ -326,7 +289,7 @@ static void flush_sse_clients(struct kbox_web_ctx *ctx)
                                               sse_push_event, &pc);
 
         if (pc.failed) {
-            /* Client disconnected -- remove */
+            /* Client disconnected; remove. */
             close(c->fd);
             ctx->sse_clients[i] = ctx->sse_clients[--ctx->sse_count];
             continue; /* re-check same index */
@@ -335,9 +298,7 @@ static void flush_sse_clients(struct kbox_web_ctx *ctx)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Compiled-in web assets (generated by scripts/gen-web-assets.sh)     */
-/* ------------------------------------------------------------------ */
+/* Compiled-in web assets (generated by scripts/gen-web-assets.sh). */
 
 extern int kbox_web_asset_find(const char *path,
                                const unsigned char **data,
@@ -359,9 +320,7 @@ static const char *content_type_for(const char *path)
     return "application/octet-stream";
 }
 
-/* ------------------------------------------------------------------ */
-/* Route dispatch                                                      */
-/* ------------------------------------------------------------------ */
+/* Route dispatch. */
 
 /*
  * Handle a single HTTP request.
@@ -408,7 +367,7 @@ static int handle_request(struct kbox_web_ctx *ctx,
         return (rc == 0) ? 1 : 0; /* keep alive on success */
     }
 
-    /* GET /api/history -- historical snapshots from ring buffer */
+    /* GET /api/history: historical snapshots from ring buffer. */
     if (strcmp(req->path, "/api/history") == 0) {
         if (strcmp(req->method, "GET") != 0)
             return send_405(fd), 0;
@@ -421,6 +380,8 @@ static int handle_request(struct kbox_web_ctx *ctx,
         int pos = 0;
         pos += snprintf(buf + pos, sizeof(buf) - (size_t) pos,
                         "{\"count\":%d,\"snapshots\":[", count);
+        if (pos >= (int) sizeof(buf))
+            pos = (int) sizeof(buf) - 1;
 
         for (int i = 0; i < count && pos < (int) sizeof(buf) - 2048; i++) {
             int idx = (head - count + i + SNAP_RING_SIZE) % SNAP_RING_SIZE;
@@ -428,8 +389,12 @@ static int handle_request(struct kbox_web_ctx *ctx,
                 buf[pos++] = ',';
             pos += kbox_snapshot_to_json(&ctx->snap_ring[idx], buf + pos,
                                          (int) sizeof(buf) - pos);
+            if (pos >= (int) sizeof(buf))
+                pos = (int) sizeof(buf) - 1;
         }
         pos += snprintf(buf + pos, sizeof(buf) - (size_t) pos, "]}");
+        if (pos >= (int) sizeof(buf))
+            pos = (int) sizeof(buf) - 1;
         pthread_mutex_unlock(&ctx->lock);
 
         send_json(fd, buf, pos);
@@ -482,9 +447,7 @@ static int handle_request(struct kbox_web_ctx *ctx,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Server thread                                                       */
-/* ------------------------------------------------------------------ */
+/* Server thread. */
 
 static void set_nonblocking(int fd)
 {
@@ -586,11 +549,7 @@ static void *server_thread_fn(void *arg)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Syscall family classification                                       */
-/* ------------------------------------------------------------------ */
-
-#include <sys/syscall.h>
+/* Syscall family classification. */
 
 static enum kbox_syscall_family kbox_syscall_to_family(int host_nr)
 {
@@ -696,9 +655,7 @@ static enum kbox_syscall_family kbox_syscall_to_family(int host_nr)
 #endif
 }
 
-/* ------------------------------------------------------------------ */
-/* Public API                                                          */
-/* ------------------------------------------------------------------ */
+/* Public API. */
 
 struct kbox_web_ctx *kbox_web_init(const struct kbox_web_config *cfg,
                                    const struct kbox_sysnrs *sysnrs)
@@ -718,8 +675,6 @@ struct kbox_web_ctx *kbox_web_init(const struct kbox_web_config *cfg,
         ctx->cfg.bind = WEB_DEFAULT_BIND;
     if (ctx->cfg.sample_ms == 0)
         ctx->cfg.sample_ms = 100;
-    if (ctx->cfg.slow_sample_ms == 0)
-        ctx->cfg.slow_sample_ms = 500;
 
     pthread_mutex_init(&ctx->lock, NULL);
     kbox_event_ring_init(&ctx->events);
@@ -748,7 +703,12 @@ struct kbox_web_ctx *kbox_web_init(const struct kbox_web_config *cfg,
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t) ctx->cfg.port);
-    inet_pton(AF_INET, ctx->cfg.bind, &addr.sin_addr);
+    if (inet_pton(AF_INET, ctx->cfg.bind, &addr.sin_addr) != 1) {
+        fprintf(stderr, "web: invalid bind address: %s\n", ctx->cfg.bind);
+        close(ctx->listen_fd);
+        free(ctx);
+        return NULL;
+    }
 
     if (bind(ctx->listen_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
         fprintf(stderr, "web: bind(%s:%d): %s\n", ctx->cfg.bind, ctx->cfg.port,
@@ -852,9 +812,8 @@ void kbox_web_tick(struct kbox_web_ctx *ctx)
 
     /* Sample telemetry from LKL /proc files */
     struct kbox_telemetry_snapshot snap;
-    kbox_telemetry_sample(ctx->sysnrs, &snap, ctx->boot_time_ns,
-                          0, /* fd_used -- filled by caller if needed */
-                          KBOX_FD_TABLE_MAX, &ctx->counters);
+    kbox_telemetry_sample(ctx->sysnrs, &snap, ctx->boot_time_ns, ctx->fd_used,
+                          KBOX_FD_TABLE_CAPACITY, &ctx->counters);
 
     /* Store snapshot under lock (web server thread reads it) */
     pthread_mutex_lock(&ctx->lock);
@@ -955,32 +914,16 @@ void kbox_web_record_syscall(struct kbox_web_ctx *ctx,
     }
 }
 
-void kbox_web_record_process(struct kbox_web_ctx *ctx,
-                             uint32_t pid,
-                             int is_exit,
-                             int exit_code,
-                             const char *command)
-{
-    if (!ctx)
-        return;
-
-    struct kbox_process_event evt = {
-        .timestamp_ns = kbox_clock_ns(),
-        .pid = pid,
-        .is_exit = is_exit,
-        .exit_code = exit_code,
-    };
-    if (command)
-        snprintf(evt.command, sizeof(evt.command), "%s", command);
-
-    pthread_mutex_lock(&ctx->lock);
-    kbox_event_push_process(&ctx->events, &evt);
-    pthread_mutex_unlock(&ctx->lock);
-}
 
 struct kbox_telemetry_counters *kbox_web_counters(struct kbox_web_ctx *ctx)
 {
     return ctx ? &ctx->counters : NULL;
+}
+
+void kbox_web_set_fd_used(struct kbox_web_ctx *ctx, uint32_t n)
+{
+    if (ctx)
+        ctx->fd_used = n;
 }
 
 #endif /* KBOX_HAS_WEB */

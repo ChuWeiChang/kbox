@@ -1,22 +1,18 @@
 /* SPDX-License-Identifier: MIT */
+
 #ifndef KBOX_CLI_H
 #define KBOX_CLI_H
 
 #include <stdbool.h>
 #include "kbox/mount.h"
 
-/*
- * CLI argument structures and parsing.
- *
- * Replaces Rust's clap derive macros with getopt_long.
- */
+/* CLI argument structures and parsing. */
 
 #define KBOX_MAX_BIND_MOUNTS 32
 #define KBOX_MAX_MOUNT_OPTS 16
 
 enum kbox_mode {
     KBOX_MODE_IMAGE,
-    /* KBOX_MODE_HOST deferred to post-MVP */
 };
 
 struct kbox_image_args {
@@ -27,8 +23,7 @@ struct kbox_image_args {
     unsigned part;        /* -p: partition number (0 = whole disk) */
     const char *work_dir; /* -w: working directory (default: /) */
     const char *command;  /* -c: command to execute (default: /bin/sh) */
-    const char
-        *cmdline; /* -k: kernel cmdline (default: mem=1024M loglevel=4) */
+    const char *cmdline;  /* -k: cmdline (default: mem=1024M loglevel=4) */
     const char *mount_opts[KBOX_MAX_MOUNT_OPTS];
     int mount_opt_count;
     const char *bind_mounts[KBOX_MAX_BIND_MOUNTS];
@@ -54,8 +49,7 @@ struct kbox_args {
     };
 };
 
-/*
- * Parse command-line arguments.
+/* Parse command-line arguments.
  * Returns 0 on success, -1 on error (message printed to stderr).
  */
 int kbox_parse_args(int argc, char *argv[], struct kbox_args *out);

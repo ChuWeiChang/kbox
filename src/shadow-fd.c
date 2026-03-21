@@ -4,20 +4,19 @@
  *
  * When the guest opens a regular file O_RDONLY, we create a memfd
  * containing the file's contents and inject it into the tracee.
- * This lets the host kernel handle mmap natively -- critical for
+ * This lets the host kernel handle mmap natively; critical for
  * dynamic linkers that mmap .so files with MAP_PRIVATE.
  */
-
-#include "kbox/shadow-fd.h"
-
-#include "kbox/lkl-wrap.h"
-#include "kbox/seccomp.h"
 
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include "lkl-wrap.h"
+#include "seccomp.h"
+#include "shadow-fd.h"
 
 /* Read chunk size: 128 KB, matches KBOX_IO_CHUNK_LEN. */
 #define SHADOW_CHUNK_LEN (128 * 1024)
@@ -75,8 +74,10 @@ int kbox_shadow_create(const struct kbox_sysnrs *s, long lkl_fd)
             close(memfd);
             return (int) ret;
         }
-        if (ret == 0)
-            break; /* EOF before expected size -- truncated file */
+        if (ret == 0) {
+            close(memfd);
+            return -EIO; /* EOF before expected size: truncated file */
+        }
 
         long written = 0;
         while (written < ret) {

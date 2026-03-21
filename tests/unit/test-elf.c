@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <string.h>
+
 #include "kbox/elf.h"
 #include "test-runner.h"
 

@@ -2,20 +2,14 @@
 /*
  * web-telemetry.c - Telemetry sampler for the web observatory.
  *
- * Two-tier timer reads LKL-internal /proc files:
- *   Fast tick (100ms): /proc/stat, /proc/meminfo, /proc/vmstat, /proc/loadavg
- *   Slow tick (500ms): /proc/sched_debug, /proc/slabinfo, /proc/buddyinfo
+ * Periodic timer reads LKL-internal /proc files:
+ *   Tick (100ms): /proc/stat, /proc/meminfo, /proc/vmstat, /proc/loadavg
  *
- * All reads go through kbox_lkl_openat/kbox_lkl_read -- these access
+ * All reads go through kbox_lkl_openat/kbox_lkl_read; these access
  * LKL's own procfs, not the host's.
  */
 
 #ifdef KBOX_HAS_WEB
-
-#include "kbox/web.h"
-
-#include "kbox/lkl-wrap.h"
-#include "kbox/syscall-nr.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -23,14 +17,16 @@
 #include <string.h>
 #include <time.h>
 
+#include "lkl-wrap.h"
+#include "syscall-nr.h"
+#include "web.h"
+
 /* AT_FDCWD for LKL (asm-generic) */
 #ifndef AT_FDCWD_LINUX
 #define AT_FDCWD_LINUX (-100)
 #endif
 
-/* ------------------------------------------------------------------ */
-/* Clock helpers                                                       */
-/* ------------------------------------------------------------------ */
+/* Clock helpers. */
 
 uint64_t kbox_clock_ns(void)
 {
@@ -39,9 +35,7 @@ uint64_t kbox_clock_ns(void)
     return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
 }
 
-/* ------------------------------------------------------------------ */
-/* LKL /proc reading                                                   */
-/* ------------------------------------------------------------------ */
+/* LKL /proc reading. */
 
 /*
  * Read a small /proc file from LKL into buf.
@@ -66,9 +60,7 @@ static int read_lkl_proc(const struct kbox_sysnrs *s,
     return (int) nr;
 }
 
-/* ------------------------------------------------------------------ */
-/* /proc parsers                                                       */
-/* ------------------------------------------------------------------ */
+/* /proc parsers. */
 
 /*
  * Parse /proc/stat for context switch count and softirq totals.
@@ -163,9 +155,7 @@ static void parse_proc_loadavg(const char *buf,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Sampler tick                                                        */
-/* ------------------------------------------------------------------ */
+/* Sampler tick. */
 
 /*
  * Per-tick time budget in nanoseconds (5ms).
@@ -214,9 +204,7 @@ done:
     snap->counters = *counters;
 }
 
-/* ------------------------------------------------------------------ */
-/* JSON serialization                                                  */
-/* ------------------------------------------------------------------ */
+/* JSON serialization. */
 
 int kbox_snapshot_to_json(const struct kbox_telemetry_snapshot *snap,
                           char *buf,
@@ -326,9 +314,7 @@ int kbox_stats_to_json(const struct kbox_telemetry_snapshot *snap,
                     mem_used_mb);
 }
 
-/* ------------------------------------------------------------------ */
-/* ENOSYS hit tracking (JSON export)                                   */
-/* ------------------------------------------------------------------ */
+/* ENOSYS hit tracking (JSON export). */
 
 int kbox_enosys_to_json(const struct kbox_telemetry_counters *c,
                         char *buf,
@@ -338,14 +324,21 @@ int kbox_enosys_to_json(const struct kbox_telemetry_counters *c,
     int first = 1;
 
     pos += snprintf(buf + pos, (size_t) (bufsz - pos), "{\"enosys_hits\":{");
+    if (pos >= bufsz)
+        pos = bufsz - 1;
 
     for (int i = 0; i < 1024; i++) {
         if (c->enosys_hits[i] == 0)
             continue;
-        if (!first)
+        if (!first) {
             pos += snprintf(buf + pos, (size_t) (bufsz - pos), ",");
+            if (pos >= bufsz)
+                pos = bufsz - 1;
+        }
         pos += snprintf(buf + pos, (size_t) (bufsz - pos), "\"%d\":%" PRIu64, i,
                         c->enosys_hits[i]);
+        if (pos >= bufsz)
+            pos = bufsz - 1;
         first = 0;
         if (pos >= bufsz - 64)
             break;
@@ -354,6 +347,8 @@ int kbox_enosys_to_json(const struct kbox_telemetry_counters *c,
     pos += snprintf(buf + pos, (size_t) (bufsz - pos),
                     "},\"overflow\":%" PRIu64 ",\"overflow_last_nr\":%d}",
                     c->enosys_overflow, c->enosys_overflow_last_nr);
+    if (pos >= bufsz)
+        pos = bufsz - 1;
     return pos;
 }
 

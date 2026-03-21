@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,8 +276,9 @@ int kbox_parse_args(int argc, char *argv[], struct kbox_args *out)
 
     if (strcmp(subcmd, "image") == 0) {
         out->mode = KBOX_MODE_IMAGE;
-        /* Shift argv past the subcommand name so getopt sees
-         * "kbox" followed by the image-specific flags. */
+        /* Shift argv past the subcommand name so getopt sees "kbox" followed by
+         * the image-specific flags.
+         */
         return parse_image_args(argc - 1, argv + 1, &out->image, argv[0]);
     }
 

@@ -1,16 +1,9 @@
 /* SPDX-License-Identifier: MIT */
-#include <stdarg.h>
+
 #include <stdio.h>
 #include <string.h>
-#include <sys/sysmacros.h>
 
-#include "kbox/lkl-wrap.h"
-#include "kbox/syscall-nr.h"
-
-#define O_RDWR 02
-#define O_CREAT 0100
-#define O_CLOEXEC 02000000
-#define S_IFCHR 0060000
+#include "lkl-wrap.h"
 
 long lkl_syscall6(long nr, long a1, long a2, long a3, long a4, long a5, long a6)
 {
@@ -53,70 +46,7 @@ int kbox_boot_kernel(const char *cmdline)
     return 0;
 }
 
-void kbox_ensure_dev_console(const struct kbox_sysnrs *s)
-{
-    long r, fd;
-
-    r = kbox_lkl_mkdir(s, "/dev", 0755);
-    if (r < 0 && r != -17)
-        fprintf(stderr, "exec preflight: mkdir /dev failed: %s (%ld)\n",
-                lkl_strerror((int) r), r);
-
-    fd = kbox_lkl_openat(s, AT_FDCWD_LINUX, "/dev/console", O_RDWR | O_CLOEXEC,
-                         0);
-    if (fd >= 0) {
-        kbox_lkl_close(s, fd);
-        fprintf(stderr, "exec preflight: /dev/console already present\n");
-        return;
-    }
-    fprintf(stderr,
-            "exec preflight: /dev/console open failed before mknod: "
-            "%s (%ld)\n",
-            lkl_strerror((int) fd), fd);
-
-    r = kbox_lkl_mknodat(s, AT_FDCWD_LINUX, "/dev/console", S_IFCHR | 0600,
-                         (long) makedev(5, 1));
-    if (r < 0 && r != -17) {
-        fprintf(stderr,
-                "exec preflight: mknod /dev/console failed: "
-                "%s (%ld)\n",
-                lkl_strerror((int) r), r);
-        return;
-    }
-
-    fd = kbox_lkl_openat(s, AT_FDCWD_LINUX, "/dev/console", O_RDWR | O_CLOEXEC,
-                         0);
-    if (fd >= 0) {
-        kbox_lkl_close(s, fd);
-        fprintf(stderr,
-                "exec preflight: /dev/console open succeeded "
-                "after mknod\n");
-        return;
-    }
-
-    fprintf(stderr,
-            "exec preflight: /dev/console open still failed: "
-            "%s (%ld); trying regular-file emulation\n",
-            lkl_strerror((int) fd), fd);
-
-    kbox_lkl_unlinkat(s, AT_FDCWD_LINUX, "/dev/console", 0);
-    fd = kbox_lkl_openat(s, AT_FDCWD_LINUX, "/dev/console",
-                         O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd >= 0) {
-        fprintf(stderr,
-                "exec preflight: emulated /dev/console as "
-                "regular file (fd=%ld)\n",
-                fd);
-        kbox_lkl_close(s, fd);
-    } else {
-        fprintf(stderr,
-                "exec preflight: regular-file /dev/console "
-                "emulation failed: %s (%ld)\n",
-                lkl_strerror((int) fd), fd);
-    }
-}
-
-/* --- Typed LKL syscall wrappers --- */
+/* Typed LKL syscall wrappers. */
 
 long kbox_lkl_mount(const struct kbox_sysnrs *s,
                     const char *src,
@@ -197,14 +127,6 @@ long kbox_lkl_fcntl(const struct kbox_sysnrs *s, long fd, long cmd, long arg)
 long kbox_lkl_dup(const struct kbox_sysnrs *s, long fd)
 {
     return lkl_syscall6(s->dup, fd, 0, 0, 0, 0, 0);
-}
-
-long kbox_lkl_dup3(const struct kbox_sysnrs *s,
-                   long oldfd,
-                   long newfd,
-                   long flags)
-{
-    return lkl_syscall6(s->dup3, oldfd, newfd, flags, 0, 0, 0);
 }
 
 long kbox_lkl_fstat(const struct kbox_sysnrs *s, long fd, void *buf)
@@ -313,15 +235,6 @@ long kbox_lkl_fchownat(const struct kbox_sysnrs *s,
                         0);
 }
 
-long kbox_lkl_mknodat(const struct kbox_sysnrs *s,
-                      long dirfd,
-                      const char *path,
-                      long mode,
-                      long dev)
-{
-    return lkl_syscall6(s->mknodat, dirfd, (long) path, mode, dev, 0, 0);
-}
-
 long kbox_lkl_chroot(const struct kbox_sysnrs *s, const char *path)
 {
     return lkl_syscall6(s->chroot, (long) path, 0, 0, 0, 0, 0);
@@ -358,30 +271,6 @@ long kbox_lkl_connect(const struct kbox_sysnrs *s,
     return lkl_syscall6(s->connect, fd, (long) addr, addrlen, 0, 0, 0);
 }
 
-long kbox_lkl_execve(const struct kbox_sysnrs *s,
-                     const char *path,
-                     const char *const *argv,
-                     const char *const *envp)
-{
-    return lkl_syscall6(s->execve, (long) path, (long) argv, (long) envp, 0, 0,
-                        0);
-}
-
-long kbox_lkl_exit(const struct kbox_sysnrs *s, int status)
-{
-    return lkl_syscall6(s->exit, (long) status, 0, 0, 0, 0, 0);
-}
-
-long kbox_lkl_wait4(const struct kbox_sysnrs *s,
-                    long pid,
-                    int *wstatus,
-                    long options,
-                    void *rusage)
-{
-    return lkl_syscall6(s->wait4, pid, (long) wstatus, options, (long) rusage,
-                        0, 0);
-}
-
 long kbox_lkl_getuid(const struct kbox_sysnrs *s)
 {
     return lkl_syscall6(s->getuid, 0, 0, 0, 0, 0, 0);
@@ -392,15 +281,6 @@ long kbox_lkl_geteuid(const struct kbox_sysnrs *s)
     return lkl_syscall6(s->geteuid, 0, 0, 0, 0, 0, 0);
 }
 
-long kbox_lkl_getresuid(const struct kbox_sysnrs *s,
-                        unsigned *ruid,
-                        unsigned *euid,
-                        unsigned *suid)
-{
-    return lkl_syscall6(s->getresuid, (long) ruid, (long) euid, (long) suid, 0,
-                        0, 0);
-}
-
 long kbox_lkl_getgid(const struct kbox_sysnrs *s)
 {
     return lkl_syscall6(s->getgid, 0, 0, 0, 0, 0, 0);
@@ -409,15 +289,6 @@ long kbox_lkl_getgid(const struct kbox_sysnrs *s)
 long kbox_lkl_getegid(const struct kbox_sysnrs *s)
 {
     return lkl_syscall6(s->getegid, 0, 0, 0, 0, 0, 0);
-}
-
-long kbox_lkl_getresgid(const struct kbox_sysnrs *s,
-                        unsigned *rgid,
-                        unsigned *egid,
-                        unsigned *sgid)
-{
-    return lkl_syscall6(s->getresgid, (long) rgid, (long) egid, (long) sgid, 0,
-                        0, 0);
 }
 
 long kbox_lkl_setuid(const struct kbox_sysnrs *s, long uid)
@@ -473,22 +344,6 @@ long kbox_lkl_setfsgid(const struct kbox_sysnrs *s, long gid)
     return lkl_syscall6(s->setfsgid, gid, 0, 0, 0, 0, 0);
 }
 
-long kbox_lkl_mmap(const struct kbox_sysnrs *s,
-                   long addr,
-                   long len,
-                   long prot,
-                   long flags,
-                   long fd,
-                   long offset)
-{
-    return lkl_syscall6(s->mmap, addr, len, prot, flags, fd, offset);
-}
-
-long kbox_lkl_munmap(const struct kbox_sysnrs *s, long addr, long len)
-{
-    return lkl_syscall6(s->munmap, addr, len, 0, 0, 0, 0);
-}
-
 long kbox_lkl_pwrite64(const struct kbox_sysnrs *s,
                        long fd,
                        const void *buf,
@@ -506,11 +361,6 @@ long kbox_lkl_readlinkat(const struct kbox_sysnrs *s,
 {
     return lkl_syscall6(s->readlinkat, dirfd, (long) path, (long) buf, bufsiz,
                         0, 0);
-}
-
-long kbox_lkl_pipe2(const struct kbox_sysnrs *s, int *pipefd, long flags)
-{
-    return lkl_syscall6(s->pipe2, (long) pipefd, flags, 0, 0, 0, 0);
 }
 
 long kbox_lkl_umask(const struct kbox_sysnrs *s, long mask)
@@ -582,7 +432,7 @@ long kbox_lkl_utimensat(const struct kbox_sysnrs *s,
                         0, 0);
 }
 
-/* --- Socket wrappers --- */
+/* Socket wrappers. */
 
 long kbox_lkl_bind(const struct kbox_sysnrs *s,
                    long fd,

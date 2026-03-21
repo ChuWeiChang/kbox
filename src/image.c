@@ -1,26 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * image.c - Image mode lifecycle.
- *
- * Opens a rootfs disk image, registers it as an LKL block device,
- * boots the kernel, mounts the filesystem, chroots in, applies
- * recommended / bind mounts, sets identity, and then forks the
- * seccomp-supervised child process.
- *
- */
 
-#include "kbox/image.h"
-#include "kbox/elf.h"
-#include "kbox/identity.h"
-#include "kbox/lkl-wrap.h"
-#include "kbox/mount.h"
-#include "kbox/net.h"
-#include "kbox/probe.h"
-#include "kbox/seccomp.h"
-#include "kbox/shadow-fd.h"
-#ifdef KBOX_HAS_WEB
-#include "kbox/web.h"
-#endif
+/* Image mode lifecycle.
+ *
+ * Opens a rootfs disk image, registers it as an LKL block device, boots the
+ * kernel, mounts the filesystem, chroots in, applies recommended / bind
+ * mounts, sets identity, and then forks the seccomp-supervised child process.
+ */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,13 +13,21 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
-/* Internal helpers                                                    */
-/* ------------------------------------------------------------------ */
+#include "kbox/elf.h"
+#include "kbox/identity.h"
+#include "kbox/image.h"
+#include "kbox/mount.h"
+#include "kbox/probe.h"
+#include "lkl-wrap.h"
+#include "net.h"
+#include "seccomp.h"
+#include "shadow-fd.h"
+#ifdef KBOX_HAS_WEB
+#include "web.h"
+#endif
 
-/*
- * Determine the root image path from the three mutually exclusive
- * options.  Returns the path, or NULL on error.
+/* Determine the root image path from the three mutually exclusive options.
+ * Returns the path, or NULL on error.
  */
 static const char *select_root_path(const struct kbox_image_args *a)
 {
@@ -49,8 +42,7 @@ static const char *select_root_path(const struct kbox_image_args *a)
     return NULL;
 }
 
-/*
- * Join mount_opts[] into a single comma-separated string.
+/* Join mount_opts[] into a single comma-separated string.
  * Writes into buf[bufsz].  Returns buf, or "" if no options.
  */
 static const char *join_mount_opts(const struct kbox_image_args *a,
@@ -63,8 +55,11 @@ static const char *join_mount_opts(const struct kbox_image_args *a,
     buf[0] = '\0';
     for (i = 0; i < a->mount_opt_count; i++) {
         size_t len = strlen(a->mount_opts[i]);
-        if (pos + len + 2 > bufsz)
-            break;
+        if (pos + len + 2 > bufsz) {
+            fprintf(stderr, "kbox: mount options overflow (%zu bytes)\n",
+                    bufsz);
+            return NULL;
+        }
         if (pos > 0)
             buf[pos++] = ',';
         memcpy(buf + pos, a->mount_opts[i], len);
@@ -74,9 +69,7 @@ static const char *join_mount_opts(const struct kbox_image_args *a,
     return buf;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public entry point                                                  */
-/* ------------------------------------------------------------------ */
+/* Public entry point. */
 
 int kbox_run_image(const struct kbox_image_args *args)
 {
@@ -98,7 +91,7 @@ int kbox_run_image(const struct kbox_image_args *args)
     uid_t override_uid = (uid_t) -1;
     gid_t override_gid = (gid_t) -1;
 
-    /* --- Resolve parameters with defaults --- */
+    /* Resolve parameters with defaults. */
     root_path = select_root_path(args);
     if (!root_path)
         return -1;
@@ -107,21 +100,21 @@ int kbox_run_image(const struct kbox_image_args *args)
     work_dir = args->work_dir ? args->work_dir : "/";
     command = args->command ? args->command : "/bin/sh";
 
-    /* --- Parse bind mount specs --- */
+    /* Parse bind mount specs. */
     for (i = 0; i < args->bind_mount_count; i++) {
         if (kbox_parse_bind_spec(args->bind_mounts[i], &bind_specs[i]) < 0)
             return -1;
         bind_count++;
     }
 
-    /* --- Open image file --- */
+    /* Open image file. */
     image_fd = open(root_path, O_RDWR);
     if (image_fd < 0) {
         fprintf(stderr, "open(%s): %s\n", root_path, strerror(errno));
         return -1;
     }
 
-    /* --- Register as LKL block device --- */
+    /* Register as LKL block device. */
     memset(&disk, 0, sizeof(disk));
     disk.dev = NULL;
     disk.fd = image_fd;
@@ -134,21 +127,26 @@ int kbox_run_image(const struct kbox_image_args *args)
         return -1;
     }
 
-    /* --- Register netdev BEFORE boot (LKL probes during boot) --- */
+    /* Register netdev before boot (LKL probes during boot). */
     if (args->net) {
         if (kbox_net_add_device() < 0)
             return -1;
     }
 
-    /* --- Boot the LKL kernel --- */
+    /* Boot the LKL kernel. */
     if (kbox_boot_kernel(args->cmdline) < 0) {
         if (args->net)
             kbox_net_cleanup();
         return -1;
     }
 
-    /* --- Mount the filesystem --- */
+    /* Mount the filesystem. */
     opts = join_mount_opts(args, opts_buf, sizeof(opts_buf));
+    if (!opts) {
+        if (args->net)
+            kbox_net_cleanup();
+        return -1;
+    }
     ret = lkl_mount_dev((unsigned) disk_id, args->part, fs_type, 0,
                         opts[0] ? opts : NULL, mount_buf, sizeof(mount_buf));
     if (ret < 0) {
@@ -158,7 +156,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         return -1;
     }
 
-    /* --- Detect syscall ABI --- */
+    /* Detect syscall ABI. */
     sysnrs = detect_sysnrs();
     if (!sysnrs) {
         fprintf(stderr, "detect_sysnrs failed\n");
@@ -167,7 +165,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         return -1;
     }
 
-    /* --- Chroot into mountpoint --- */
+    /* Chroot into mountpoint. */
     ret = kbox_lkl_chroot(sysnrs, mount_buf);
     if (ret < 0) {
         fprintf(stderr, "chroot(%s): %s\n", mount_buf, kbox_err_text(ret));
@@ -176,7 +174,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         return -1;
     }
 
-    /* --- Recommended mounts --- */
+    /* Recommended mounts. */
     if (args->recommended || args->system_root) {
         if (kbox_apply_recommended_mounts(sysnrs, args->mount_profile) < 0) {
             if (args->net)
@@ -185,7 +183,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         }
     }
 
-    /* --- Bind mounts --- */
+    /* Bind mounts. */
     if (bind_count > 0) {
         if (kbox_apply_bind_mounts(sysnrs, bind_specs, bind_count) < 0) {
             if (args->net)
@@ -194,7 +192,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         }
     }
 
-    /* --- Working directory --- */
+    /* Working directory. */
     ret = kbox_lkl_chdir(sysnrs, work_dir);
     if (ret < 0) {
         fprintf(stderr, "chdir(%s): %s\n", work_dir, kbox_err_text(ret));
@@ -203,7 +201,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         return -1;
     }
 
-    /* --- Identity --- */
+    /* Identity. */
     if (args->change_id) {
         if (kbox_parse_change_id(args->change_id, &override_uid,
                                  &override_gid) < 0) {
@@ -223,14 +221,14 @@ int kbox_run_image(const struct kbox_image_args *args)
         }
     }
 
-    /* --- Probe host features --- */
+    /* Probe host features. */
     if (kbox_probe_host_features() < 0) {
         if (args->net)
             kbox_net_cleanup();
         return -1;
     }
 
-    /* --- Networking: configure interface (optional) --- */
+    /* Networking: configure interface (optional). */
     if (args->net) {
         if (kbox_net_configure(sysnrs) < 0) {
             kbox_net_cleanup();
@@ -238,7 +236,7 @@ int kbox_run_image(const struct kbox_image_args *args)
         }
     }
 
-    /* --- Web observatory (optional) --- */
+    /* Web observatory (optional). */
     struct kbox_web_ctx *web_ctx = NULL;
 #ifdef KBOX_HAS_WEB
     if (args->web || args->trace_format) {
@@ -260,21 +258,18 @@ int kbox_run_image(const struct kbox_image_args *args)
     }
 #endif
 
-    /*
-     * --- Extract binary from LKL into memfd ---
+    /* Extract binary from LKL into memfd.
      *
-     * The child process will exec via fexecve(memfd), because
-     * the binary lives inside the LKL-mounted filesystem and
-     * does not exist on the host.
+     * The child process will exec via fexecve(memfd), because the binary lives
+     * inside the LKL-mounted filesystem and does not exist on the host.
      *
-     * For dynamically-linked binaries, the ELF contains a PT_INTERP
-     * segment naming the interpreter (e.g. /lib/ld-musl-x86_64.so.1).
-     * The host kernel resolves PT_INTERP from the host VFS, not the
-     * LKL image, so the interpreter cannot be found.  Fix: extract
-     * the interpreter into a second memfd and patch PT_INTERP in the
-     * main binary to /proc/self/fd/<interp_fd>.  The kernel opens
-     * /proc/self/fd/N during load_elf_binary (before close-on-exec),
-     * so both memfds can keep MFD_CLOEXEC.
+     * For dynamically-linked binaries, ELF contains a PT_INTERP segment naming
+     * the interpreter (e.g. /lib/ld-musl-x86_64.so.1). The host kernel resolves
+     * PT_INTERP from the host VFS, not the LKL image, so the interpreter cannot
+     * be found. Fix: extract the interpreter into a second memfd and patch
+     * PT_INTERP in the main binary to /proc/self/fd/<interp_fd>. The kernel
+     * opens /proc/self/fd/N during load_elf_binary (before close-on-exec), so
+     * both memfds can keep MFD_CLOEXEC.
      */
     {
         long lkl_fd;
@@ -298,10 +293,9 @@ int kbox_run_image(const struct kbox_image_args *args)
             goto err_net;
         }
 
-        /*
-         * Check for PT_INTERP (dynamic binary).  Read the first 4 KB
-         * of the memfd -- enough for the ELF header and program header
-         * table of any reasonable binary.
+        /* Check for PT_INTERP (dynamic binary). Read the first 4 KB of memfd;
+         * enough for the ELF header and program header table of any reasonable
+         * binary.
          */
         {
             unsigned char elf_buf[4096];
@@ -315,9 +309,7 @@ int kbox_run_image(const struct kbox_image_args *args)
                     &pt_offset, &pt_filesz);
 
                 if (ilen > 0) {
-                    /*
-                     * Dynamic binary: extract the interpreter from LKL.
-                     */
+                    /* Dynamic binary: extract the interpreter from LKL. */
                     long interp_lkl_fd = kbox_lkl_openat(
                         sysnrs, AT_FDCWD_LINUX, interp_path, O_RDONLY, 0);
                     if (interp_lkl_fd < 0) {
@@ -339,11 +331,10 @@ int kbox_run_image(const struct kbox_image_args *args)
                         goto err_net;
                     }
 
-                    /*
-                     * Patch PT_INTERP in the main binary memfd to point
-                     * to /proc/self/fd/<interp_memfd>.  The child inherits
-                     * both memfds via fork; the kernel resolves the patched
-                     * path during exec.
+                    /* Patch PT_INTERP in the main binary memfd to point to
+                     * /proc/self/fd/<interp_memfd>. The child inherits both
+                     * memfds via fork; the kernel resolves the patched path
+                     * during exec.
                      */
                     char new_interp[64];
                     int new_len = snprintf(new_interp, sizeof(new_interp),
@@ -359,10 +350,9 @@ int kbox_run_image(const struct kbox_image_args *args)
                         goto err_net;
                     }
 
-                    /*
-                     * Write the new path, zero-filling the rest of the
-                     * PT_INTERP segment.  pwrite does not change the
-                     * file offset.
+                    /* Write the new path, zero-filling the rest of the
+                     * PT_INTERP segment. pwrite does not change the file
+                     * offset.
                      */
                     char patch[256];
                     size_t patch_len = (size_t) pt_filesz;

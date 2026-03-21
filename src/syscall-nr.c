@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdio.h>
 
-#include "kbox/syscall-nr.h"
+#include "syscall-nr.h"
 
-/* Forward declaration -- implemented in lkl-wrap.c */
+/* Forward declaration: implemented in lkl-wrap.c */
 long lkl_syscall6(long nr,
                   long a1,
                   long a2,
@@ -525,7 +525,7 @@ const struct kbox_host_nrs HOST_NRS_AARCH64 = {
 #ifndef KBOX_UNIT_TEST
 /*
  * LKL ARCH=lkl always uses the asm-generic ABI.  No runtime probing
- * needed -- the generic syscall table is the only one that applies.
+ * needed; the generic syscall table is the only one that applies.
  *
  * The old mkdir-based runtime probe is retained under KBOX_DEBUG_ABI_PROBE
  * for development diagnostics only.
@@ -591,173 +591,8 @@ const char *syscall_name_from_nr(const struct kbox_host_nrs *h, int nr)
     do {                                     \
         if (h->field >= 0 && h->field == nr) \
             return #field;                   \
-    } while (0)
-    CHECK(openat);
-    CHECK(openat2);
-    CHECK(open);
-    CHECK(stat);
-    CHECK(lstat);
-    CHECK(access);
-    CHECK(rename);
-    CHECK(mkdir);
-    CHECK(rmdir);
-    CHECK(unlink);
-    CHECK(chmod);
-    CHECK(chown);
-    CHECK(fstat);
-    CHECK(newfstatat);
-    CHECK(statx);
-    CHECK(faccessat);
-    CHECK(faccessat2);
-    CHECK(getdents64);
-    CHECK(getdents);
-    CHECK(mkdirat);
-    CHECK(unlinkat);
-    CHECK(renameat);
-    CHECK(renameat2);
-    CHECK(fchmodat);
-    CHECK(fchownat);
-    CHECK(close);
-    CHECK(sendmsg);
-    CHECK(socket);
-    CHECK(connect);
-    CHECK(bind);
-    CHECK(listen);
-    CHECK(accept);
-    CHECK(accept4);
-    CHECK(sendto);
-    CHECK(recvfrom);
-    CHECK(recvmsg);
-    CHECK(getsockopt);
-    CHECK(setsockopt);
-    CHECK(getsockname);
-    CHECK(getpeername);
-    CHECK(shutdown);
-    CHECK(exit);
-    CHECK(exit_group);
-    CHECK(fcntl);
-    CHECK(dup);
-    CHECK(dup2);
-    CHECK(dup3);
-    CHECK(read);
-    CHECK(write);
-    CHECK(pread64);
-    CHECK(lseek);
-    CHECK(chdir);
-    CHECK(fchdir);
-    CHECK(getcwd);
-    CHECK(getuid);
-    CHECK(geteuid);
-    CHECK(getresuid);
-    CHECK(getgid);
-    CHECK(getegid);
-    CHECK(getresgid);
-    CHECK(setuid);
-    CHECK(setreuid);
-    CHECK(setresuid);
-    CHECK(setgid);
-    CHECK(setregid);
-    CHECK(setresgid);
-    CHECK(getgroups);
-    CHECK(setgroups);
-    CHECK(setfsgid);
-    CHECK(mount);
-    CHECK(umount2);
-    CHECK(execve);
-    CHECK(execveat);
-    CHECK(getpid);
-    CHECK(getppid);
-    CHECK(gettid);
-    CHECK(setpgid);
-    CHECK(getpgid);
-    CHECK(getsid);
-    CHECK(setsid);
-    CHECK(clock_gettime);
-    CHECK(clock_getres);
-    CHECK(gettimeofday);
-    CHECK(readlinkat);
-    CHECK(pipe2);
-    CHECK(pipe);
-    CHECK(sendfile);
-    CHECK(copy_file_range);
-    CHECK(pwrite64);
-    CHECK(writev);
-    CHECK(readv);
-    CHECK(ftruncate);
-    CHECK(fallocate);
-    CHECK(flock);
-    CHECK(fsync);
-    CHECK(fdatasync);
-    CHECK(sync);
-    CHECK(symlinkat);
-    CHECK(linkat);
-    CHECK(utimensat);
-    CHECK(ioctl);
-    CHECK(umask);
-    CHECK(uname);
-    CHECK(brk);
-    CHECK(getrandom);
-    CHECK(syslog);
-    CHECK(prctl);
-    CHECK(wait4);
-    CHECK(waitid);
-    CHECK(rt_sigaction);
-    CHECK(rt_sigprocmask);
-    CHECK(rt_sigreturn);
-    CHECK(rt_sigpending);
-    CHECK(rt_sigaltstack);
-    CHECK(kill);
-    CHECK(tgkill);
-    CHECK(tkill);
-    CHECK(pidfd_send_signal);
-    CHECK(setitimer);
-    CHECK(getitimer);
-    /* alarm may be -1 on aarch64 */
-    CHECK(set_tid_address);
-    CHECK(set_robust_list);
-    CHECK(futex);
-    CHECK(clone3);
-    CHECK(arch_prctl);
-    CHECK(rseq);
-    CHECK(clone);
-    CHECK(fork);
-    CHECK(vfork);
-    CHECK(mmap);
-    CHECK(munmap);
-    CHECK(mprotect);
-    CHECK(mremap);
-    CHECK(membarrier);
-    CHECK(sched_yield);
-    CHECK(sched_setparam);
-    CHECK(sched_getparam);
-    CHECK(sched_setscheduler);
-    CHECK(sched_getscheduler);
-    CHECK(sched_get_priority_max);
-    CHECK(sched_get_priority_min);
-    CHECK(sched_setaffinity);
-    CHECK(sched_getaffinity);
-    CHECK(prlimit64);
-    CHECK(madvise);
-    CHECK(getrlimit);
-    CHECK(getrusage);
-    CHECK(epoll_create1);
-    CHECK(epoll_ctl);
-    CHECK(epoll_wait);
-    CHECK(epoll_pwait);
-    CHECK(ppoll);
-    CHECK(pselect6);
-    CHECK(poll);
-    CHECK(nanosleep);
-    CHECK(clock_nanosleep);
-    CHECK(timerfd_create);
-    CHECK(timerfd_settime);
-    CHECK(timerfd_gettime);
-    CHECK(eventfd);
-    CHECK(eventfd2);
-    CHECK(statfs);
-    CHECK(fstatfs);
-    CHECK(sysinfo);
-    CHECK(readlink);
+    } while (0);
+    KBOX_HOST_NR_FIELDS(CHECK);
 #undef CHECK
     return "unknown";
 }
