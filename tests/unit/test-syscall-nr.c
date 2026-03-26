@@ -70,6 +70,11 @@ static void test_host_x86_64_sendmsg(void)
     ASSERT_EQ(HOST_NRS_X86_64.sendmsg, 46);
 }
 
+static void test_host_aarch64_gettimeofday(void)
+{
+    ASSERT_EQ(HOST_NRS_AARCH64.gettimeofday, 169);
+}
+
 static void test_host_aarch64_no_open(void)
 {
     /* aarch64 has no legacy open syscall */
@@ -98,6 +103,7 @@ void test_syscall_nr_init(void)
     TEST_REGISTER(test_generic_mkdirat_style);
     TEST_REGISTER(test_generic_getdents_unavailable);
     TEST_REGISTER(test_host_x86_64_sendmsg);
+    TEST_REGISTER(test_host_aarch64_gettimeofday);
     TEST_REGISTER(test_host_aarch64_no_open);
     TEST_REGISTER(test_at_fdcwd);
 }

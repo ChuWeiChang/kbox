@@ -135,9 +135,6 @@ static void *rx_reader_loop(void *arg)
         if (pkt_len == 0)
             continue; /* wakeup signal, not a real packet */
 
-        if (pkt_len > MAX_PKT_SIZE)
-            break;
-
         /* Read payload. */
         uint8_t buf[MAX_PKT_SIZE];
         size_t remaining = pkt_len;
@@ -774,7 +771,7 @@ static void drain_tx_pipe(void)
         ssize_t n = read(tx_pipe[0], &pkt_len, sizeof(pkt_len));
         if (n != sizeof(pkt_len))
             break;
-        if (pkt_len == 0 || pkt_len > MAX_PKT_SIZE)
+        if (pkt_len == 0)
             break;
 
         size_t remaining = pkt_len;

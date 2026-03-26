@@ -39,5 +39,88 @@ int kbox_find_elf_interp_loc(const unsigned char *buf,
                              size_t out_size,
                              uint64_t *offset_out,
                              uint64_t *filesz_out);
+int kbox_read_elf_header_window_fd(int fd,
+                                   unsigned char **buf_out,
+                                   size_t *buf_len_out);
+
+struct kbox_elf_exec_segment {
+    uint64_t file_offset;
+    uint64_t file_size;
+    uint64_t vaddr;
+    uint64_t mem_size;
+};
+
+#define KBOX_ELF_MAX_LOAD_SEGMENTS 16
+
+struct kbox_elf_load_segment {
+    uint64_t file_offset;
+    uint64_t file_size;
+    uint64_t vaddr;
+    uint64_t mem_size;
+    uint64_t align;
+    uint64_t map_align;
+    uint64_t map_offset;
+    uint64_t map_start;
+    uint64_t map_size;
+    uint32_t flags;
+};
+
+struct kbox_elf_load_plan {
+    uint16_t machine;
+    uint16_t type;
+    uint64_t entry;
+    uint64_t phoff;
+    uint16_t phentsize;
+    uint16_t phnum;
+    uint64_t phdr_vaddr;
+    uint64_t phdr_size;
+    uint64_t min_vaddr;
+    uint64_t max_vaddr;
+    uint64_t load_size;
+    uint64_t interp_offset;
+    uint64_t interp_size;
+    uint32_t stack_flags;
+    size_t segment_count;
+    int has_interp;
+    int pie;
+    struct kbox_elf_load_segment segments[KBOX_ELF_MAX_LOAD_SEGMENTS];
+};
+
+int kbox_build_elf_load_plan(const unsigned char *buf,
+                             size_t buf_len,
+                             uint64_t page_size,
+                             struct kbox_elf_load_plan *plan);
+
+typedef int (*kbox_elf_exec_segment_cb)(const struct kbox_elf_exec_segment *seg,
+                                        const unsigned char *segment_bytes,
+                                        void *opaque);
+typedef int (*kbox_elf_exec_segment_header_cb)(
+    const struct kbox_elf_exec_segment *seg,
+    void *opaque);
+
+/* Return the ELF machine type (e_machine) for a 64-bit little-endian image. */
+int kbox_elf_machine(const unsigned char *buf,
+                     size_t buf_len,
+                     uint16_t *machine_out);
+
+/* Visit every PT_LOAD|PF_X segment with file-backed bytes (read-only).
+ * The callback receives a const pointer to segment bytes, suitable for
+ * analysis/scanning but not for in-place rewriting.  A mutable variant
+ * will be needed when actual instruction replacement is implemented.
+ * Returns the number of visited segments on success or -1 on malformed ELF.
+ */
+int kbox_visit_elf_exec_segments(const unsigned char *buf,
+                                 size_t buf_len,
+                                 kbox_elf_exec_segment_cb cb,
+                                 void *opaque);
+
+/* Visit executable PT_LOAD segment metadata. Only the ELF header and program
+ * header table need to be present in @buf; the segment payload bytes are not
+ * dereferenced.
+ */
+int kbox_visit_elf_exec_segment_headers(const unsigned char *buf,
+                                        size_t buf_len,
+                                        kbox_elf_exec_segment_header_cb cb,
+                                        void *opaque);
 
 #endif /* KBOX_ELF_H */

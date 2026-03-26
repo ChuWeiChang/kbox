@@ -1,20 +1,53 @@
 # mk/tests.mk - Test targets (unit, integration, stress, guest binaries)
 
 # Unit test files (no LKL dependency)
+# Portable tests (compile on any host):
 TEST_DIR   = tests/unit
 TEST_SRCS  = $(TEST_DIR)/test-runner.c \
              $(TEST_DIR)/test-fd-table.c \
              $(TEST_DIR)/test-path.c \
              $(TEST_DIR)/test-identity.c \
              $(TEST_DIR)/test-syscall-nr.c \
-             $(TEST_DIR)/test-elf.c
+             $(TEST_DIR)/test-elf.c \
+             $(TEST_DIR)/test-x86-decode.c
+
+# Linux-only tests (depend on inline asm, siginfo_t/ucontext, memfd_create):
+ifeq ($(shell uname -s),Linux)
+TEST_SRCS += $(TEST_DIR)/test-rewrite.c \
+             $(TEST_DIR)/test-procmem.c \
+             $(TEST_DIR)/test-syscall-request.c \
+             $(TEST_DIR)/test-syscall-trap.c \
+             $(TEST_DIR)/test-loader-entry.c \
+             $(TEST_DIR)/test-loader-handoff.c \
+             $(TEST_DIR)/test-loader-image.c \
+             $(TEST_DIR)/test-loader-layout.c \
+             $(TEST_DIR)/test-loader-launch.c \
+             $(TEST_DIR)/test-loader-stack.c \
+             $(TEST_DIR)/test-loader-transfer.c
+endif
 
 # Unit tests link only the pure-computation sources (no LKL)
 TEST_SUPPORT_SRCS = $(SRC_DIR)/fd-table.c \
                     $(SRC_DIR)/path.c \
                     $(SRC_DIR)/identity.c \
                     $(SRC_DIR)/syscall-nr.c \
-                    $(SRC_DIR)/elf.c
+                    $(SRC_DIR)/elf.c \
+                    $(SRC_DIR)/x86-decode.c
+
+ifeq ($(shell uname -s),Linux)
+TEST_SUPPORT_SRCS += $(SRC_DIR)/rewrite.c \
+                     $(TEST_DIR)/test-seccomp-stubs.c \
+                     $(SRC_DIR)/procmem.c \
+                     $(SRC_DIR)/syscall-request.c \
+                     $(SRC_DIR)/syscall-trap.c \
+                     $(SRC_DIR)/loader-entry.c \
+                     $(SRC_DIR)/loader-handoff.c \
+                     $(SRC_DIR)/loader-image.c \
+                     $(SRC_DIR)/loader-layout.c \
+                     $(SRC_DIR)/loader-launch.c \
+                     $(SRC_DIR)/loader-stack.c \
+                     $(SRC_DIR)/loader-transfer.c
+endif
 
 TEST_TARGET  = tests/unit/test-runner
 
@@ -43,7 +76,7 @@ check-unit: $(TEST_TARGET)
 # We define LKL stubs for functions referenced by test support code.
 $(TEST_TARGET): $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(wildcard .config)
 	@echo "  LD      $@"
-	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(LDFLAGS)
+	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(LDFLAGS) -lpthread
 
 check-integration: $(TARGET) guest-bins stress-bins $(ROOTFS)
 	@echo "  RUN     check-integration"

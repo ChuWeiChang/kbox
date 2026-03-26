@@ -146,6 +146,54 @@ static int probe_seccomp_listener(void)
     return -1;
 }
 
+static int probe_seccomp_filter_basic(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "probe: fork: %s\n", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        struct kbox_sock_filter filter[2];
+        struct kbox_sock_fprog prog;
+        long ret;
+
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+            _exit(1);
+
+        filter[0] = (struct kbox_sock_filter) {
+            KBOX_BPF_LD | KBOX_BPF_W | KBOX_BPF_ABS, 0, 0, 0};
+        filter[1] = (struct kbox_sock_filter) {KBOX_BPF_RET | KBOX_BPF_K, 0, 0,
+                                               KBOX_SECCOMP_RET_ALLOW};
+        prog.len = 2;
+        prog.filter = filter;
+
+        ret = syscall(__NR_seccomp, KBOX_SECCOMP_SET_MODE_FILTER, 0, &prog);
+        if (ret < 0)
+            _exit(2);
+        _exit(0);
+    }
+
+    {
+        int status = 0;
+        pid_t w;
+
+        do {
+            w = waitpid(pid, &status, 0);
+        } while (w < 0 && errno == EINTR);
+        if (w < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr,
+                    "probe: FAIL -- seccomp(SET_MODE_FILTER) is not "
+                    "supported.\n"
+                    "  This is required for all syscall modes.\n");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 /* Check process_vm_readv works between parent and child.
  *
  * Ubuntu's AppArmor and Yama LSM (ptrace_scope >= 1) can restrict
@@ -248,23 +296,71 @@ static int probe_yama_scope(void)
 
 /* Public entry point. */
 
-int kbox_probe_host_features(void)
+int kbox_collect_probe_result(enum kbox_syscall_mode mode,
+                              struct kbox_probe_result *out)
+{
+    int need_supervisor = 0;
+
+    if (!out)
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+
+    if (mode == KBOX_SYSCALL_MODE_SECCOMP || mode == KBOX_SYSCALL_MODE_AUTO)
+        need_supervisor = 1;
+
+    out->no_new_privs_ok = probe_no_new_privs() == 0;
+    out->seccomp_filter_ok = probe_seccomp_filter_basic() == 0;
+
+    if (need_supervisor) {
+        out->seccomp_listener_ok = probe_seccomp_listener() == 0;
+        out->process_vm_readv_ok = probe_process_vm_readv() == 0;
+    }
+
+    return 0;
+}
+
+int kbox_probe_host_features(enum kbox_syscall_mode mode)
 {
     int failures = 0;
+    int need_supervisor = 0;
+    struct kbox_probe_result result;
 
     fprintf(stderr, "kbox: probing host features...\n");
 
     /* Advisory check first. */
     probe_yama_scope();
 
-    if (probe_no_new_privs() < 0)
+    if (kbox_collect_probe_result(mode, &result) < 0)
+        return -1;
+
+    if (mode == KBOX_SYSCALL_MODE_SECCOMP)
+        need_supervisor = 1;
+
+    if (!result.no_new_privs_ok)
+        failures++;
+    if (!result.seccomp_filter_ok)
         failures++;
 
-    if (probe_seccomp_listener() < 0)
-        failures++;
+    if (need_supervisor) {
+        if (!result.seccomp_listener_ok)
+            failures++;
+        if (!result.process_vm_readv_ok)
+            failures++;
+    }
 
-    if (probe_process_vm_readv() < 0)
-        failures++;
+    /* AUTO probes supervisor features but only warns (doesn't fail).
+     * The launch path selects trap for direct binaries and seccomp
+     * for shells.  If seccomp-unotify is unavailable, AUTO still
+     * works for direct binaries via the trap path.
+     */
+    if (mode == KBOX_SYSCALL_MODE_AUTO) {
+        if (!result.seccomp_listener_ok || !result.process_vm_readv_ok) {
+            fprintf(stderr,
+                    "kbox: WARN -- seccomp-unotify features unavailable; "
+                    "AUTO mode restricted to trap fast path only\n");
+        }
+    }
 
     if (failures > 0) {
         fprintf(stderr,

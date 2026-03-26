@@ -8,6 +8,8 @@
 
 #include "test-runner.h"
 
+#include <unistd.h>
+
 #define MAX_TESTS 256
 
 struct test_entry {
@@ -29,6 +31,20 @@ void test_register(const char *name, test_fn fn)
     tests[test_count].name = name;
     tests[test_count].fn = fn;
     test_count++;
+}
+
+int test_mkstemp(char *path, size_t path_len, const char *name)
+{
+    const char *tmpdir = getenv("TMPDIR");
+
+    if (!path || path_len == 0 || !name || !name[0])
+        return -1;
+    if (!tmpdir || !tmpdir[0])
+        tmpdir = "/tmp";
+    if ((size_t) snprintf(path, path_len, "%s/%s-XXXXXX", tmpdir, name) >=
+        path_len)
+        return -1;
+    return mkstemp(path);
 }
 
 void test_fail(const char *file, int line, const char *expr)
@@ -72,23 +88,56 @@ void test_pass(void)
 }
 
 /* External init functions from each test file */
+/* Portable test suites (all hosts) */
 extern void test_fd_table_init(void);
 extern void test_path_init(void);
 extern void test_identity_init(void);
 extern void test_syscall_nr_init(void);
 extern void test_elf_init(void);
+extern void test_x86_decode_init(void);
+
+/* Linux-only test suites */
+#ifdef __linux__
+extern void test_procmem_init(void);
+extern void test_syscall_request_init(void);
+extern void test_syscall_trap_init(void);
+extern void test_loader_entry_init(void);
+extern void test_loader_handoff_init(void);
+extern void test_loader_image_init(void);
+extern void test_loader_layout_init(void);
+extern void test_loader_launch_init(void);
+extern void test_loader_stack_init(void);
+extern void test_loader_transfer_init(void);
+extern void test_rewrite_init(void);
+#endif
 
 int main(int argc, char *argv[])
 {
     (void) argc;
     (void) argv;
 
-    /* Register all test suites */
+    /* Portable suites */
     test_fd_table_init();
     test_path_init();
     test_identity_init();
     test_syscall_nr_init();
     test_elf_init();
+    test_x86_decode_init();
+
+    /* Linux-only suites */
+#ifdef __linux__
+    test_procmem_init();
+    test_syscall_request_init();
+    test_syscall_trap_init();
+    test_loader_entry_init();
+    test_loader_handoff_init();
+    test_loader_image_init();
+    test_loader_layout_init();
+    test_loader_launch_init();
+    test_loader_stack_init();
+    test_loader_transfer_init();
+    test_rewrite_init();
+#endif
 
     /* Run all tests */
     int suite_fails = 0;

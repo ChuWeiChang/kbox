@@ -329,7 +329,7 @@ static int handle_request(struct kbox_web_ctx *ctx,
 {
     char buf[WEB_RESP_BUF_SIZE];
 
-    /* Static assets (/, /style.css, /js/*.js) */
+    /* Static assets under / and /js/. */
     if (strcmp(req->method, "GET") == 0 &&
         strncmp(req->path, "/api/", 5) != 0 &&
         strcmp(req->path, "/stats") != 0) {

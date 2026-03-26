@@ -36,6 +36,7 @@ void kbox_fd_table_init(struct kbox_fd_table *t)
         t->entries[i].lkl_fd = -1;
         t->entries[i].host_fd = -1;
         t->entries[i].shadow_sp = -1;
+        t->entries[i].shadow_writeback = 0;
         t->entries[i].mirror_tty = 0;
         t->entries[i].cloexec = 0;
     }
@@ -43,10 +44,13 @@ void kbox_fd_table_init(struct kbox_fd_table *t)
         t->low_fds[i].lkl_fd = -1;
         t->low_fds[i].host_fd = -1;
         t->low_fds[i].shadow_sp = -1;
+        t->low_fds[i].shadow_writeback = 0;
         t->low_fds[i].mirror_tty = 0;
         t->low_fds[i].cloexec = 0;
     }
     t->next_fd = KBOX_FD_BASE;
+    t->next_fast_fd = KBOX_FD_FAST_BASE;
+    t->next_hostonly_fd = KBOX_FD_HOSTONLY_BASE;
 }
 
 /* Auto-allocate: always from the high range (>= KBOX_FD_BASE).
@@ -55,20 +59,22 @@ void kbox_fd_table_init(struct kbox_fd_table *t)
 long kbox_fd_table_insert(struct kbox_fd_table *t, long lkl_fd, int mirror_tty)
 {
     long start_idx = t->next_fd - KBOX_FD_BASE;
+    long limit_idx = KBOX_FD_FAST_BASE - KBOX_FD_BASE;
     long idx;
 
     if (start_idx < 0)
         start_idx = 0;
-    if (start_idx >= KBOX_FD_TABLE_MAX)
+    if (start_idx >= limit_idx)
         start_idx = 0;
 
-    for (idx = start_idx; idx < KBOX_FD_TABLE_MAX; idx++) {
+    for (idx = start_idx; idx < limit_idx; idx++) {
         if (t->entries[idx].lkl_fd == -1) {
             long vfd = idx + KBOX_FD_BASE;
 
             t->entries[idx].lkl_fd = lkl_fd;
             t->entries[idx].host_fd = -1;
             t->entries[idx].shadow_sp = -1;
+            t->entries[idx].shadow_writeback = 0;
             t->entries[idx].mirror_tty = mirror_tty;
             t->entries[idx].cloexec = 0;
             t->next_fd = vfd + 1;
@@ -84,6 +90,7 @@ long kbox_fd_table_insert(struct kbox_fd_table *t, long lkl_fd, int mirror_tty)
             t->entries[idx].lkl_fd = lkl_fd;
             t->entries[idx].host_fd = -1;
             t->entries[idx].shadow_sp = -1;
+            t->entries[idx].shadow_writeback = 0;
             t->entries[idx].mirror_tty = mirror_tty;
             t->entries[idx].cloexec = 0;
             t->next_fd = vfd + 1;
@@ -92,6 +99,53 @@ long kbox_fd_table_insert(struct kbox_fd_table *t, long lkl_fd, int mirror_tty)
     }
 
     return -1; /* table truly full */
+}
+
+long kbox_fd_table_insert_fast(struct kbox_fd_table *t,
+                               long lkl_fd,
+                               int mirror_tty)
+{
+    long start_idx = t->next_fast_fd - KBOX_FD_BASE;
+    long base_idx = KBOX_FD_FAST_BASE - KBOX_FD_BASE;
+    long limit_idx = KBOX_FD_HOSTONLY_BASE - KBOX_FD_BASE;
+    long idx;
+
+    if (start_idx < base_idx)
+        start_idx = base_idx;
+    if (start_idx >= limit_idx)
+        start_idx = base_idx;
+
+    for (idx = start_idx; idx < limit_idx; idx++) {
+        if (t->entries[idx].lkl_fd == -1) {
+            long vfd = idx + KBOX_FD_BASE;
+
+            t->entries[idx].lkl_fd = lkl_fd;
+            t->entries[idx].host_fd = -1;
+            t->entries[idx].shadow_sp = -1;
+            t->entries[idx].shadow_writeback = 0;
+            t->entries[idx].mirror_tty = mirror_tty;
+            t->entries[idx].cloexec = 0;
+            t->next_fast_fd = vfd + 1;
+            return vfd;
+        }
+    }
+
+    for (idx = base_idx; idx < start_idx; idx++) {
+        if (t->entries[idx].lkl_fd == -1) {
+            long vfd = idx + KBOX_FD_BASE;
+
+            t->entries[idx].lkl_fd = lkl_fd;
+            t->entries[idx].host_fd = -1;
+            t->entries[idx].shadow_sp = -1;
+            t->entries[idx].shadow_writeback = 0;
+            t->entries[idx].mirror_tty = mirror_tty;
+            t->entries[idx].cloexec = 0;
+            t->next_fast_fd = vfd + 1;
+            return vfd;
+        }
+    }
+
+    return -1;
 }
 
 int kbox_fd_table_insert_at(struct kbox_fd_table *t,
@@ -106,6 +160,7 @@ int kbox_fd_table_insert_at(struct kbox_fd_table *t,
     e->lkl_fd = lkl_fd;
     e->host_fd = -1;
     e->shadow_sp = -1;
+    e->shadow_writeback = 0;
     e->mirror_tty = mirror_tty;
     e->cloexec = 0;
 
@@ -145,9 +200,23 @@ long kbox_fd_table_remove(struct kbox_fd_table *t, long fd)
 #endif
     e->host_fd = -1;
     e->shadow_sp = -1;
+    e->shadow_writeback = 0;
     e->lkl_fd = -1;
     e->mirror_tty = 0;
     e->cloexec = 0;
+    if (fd >= KBOX_FD_HOSTONLY_BASE && fd < KBOX_FD_BASE + KBOX_FD_TABLE_MAX &&
+        (t->next_hostonly_fd < KBOX_FD_HOSTONLY_BASE ||
+         fd < t->next_hostonly_fd)) {
+        t->next_hostonly_fd = fd;
+    }
+    if (fd >= KBOX_FD_FAST_BASE && fd < KBOX_FD_HOSTONLY_BASE &&
+        (t->next_fast_fd < KBOX_FD_FAST_BASE || fd < t->next_fast_fd)) {
+        t->next_fast_fd = fd;
+    }
+    if (fd >= KBOX_FD_BASE && fd < KBOX_FD_FAST_BASE &&
+        (t->next_fd < KBOX_FD_BASE || fd < t->next_fd)) {
+        t->next_fd = fd;
+    }
     return old;
 }
 
@@ -181,6 +250,7 @@ static void clear_entry(struct kbox_fd_entry *e)
     e->lkl_fd = -1;
     e->host_fd = -1;
     e->shadow_sp = -1;
+    e->shadow_writeback = 0;
     e->mirror_tty = 0;
     e->cloexec = 0;
 }

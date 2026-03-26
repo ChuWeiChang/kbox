@@ -4,15 +4,17 @@ Acceptance test definition for the C rewrite. For each syscall in the MVP
 set, documents: arguments, return value, errno, side effects, and any
 deviation from the Rust implementation.
 
-Status: all syscalls below are implemented in seccomp_dispatch.c.
+Status: all syscalls below are implemented in seccomp-dispatch.c via
+kbox_dispatch_request(). The same dispatch engine handles all three
+interception tiers (seccomp-unotify, SIGSYS trap, binary rewriting).
 
 ## Notation
 
-- `vfd`: virtual file descriptor (4096+), mapped to LKL-internal fd
+- `vfd`: virtual file descriptor (32768+), mapped to LKL-internal fd
 - `LKL(...)`: forwarded to LKL via lkl_syscall6()
-- `CONTINUE`: seccomp_notif_resp with FLAG_CONTINUE (host kernel handles)
-- `RETURN(val)`: seccomp_notif_resp with injected return value
-- `ERRNO(e)`: seccomp_notif_resp with error = e
+- `CONTINUE`: host kernel handles (seccomp: FLAG_CONTINUE; trap: re-issue via asm trampoline)
+- `RETURN(val)`: injected return value
+- `ERRNO(e)`: return with error = e
 
 ---
 

@@ -37,9 +37,6 @@ int kbox_shadow_create(const struct kbox_sysnrs *s, long lkl_fd)
     if (!S_ISREG(kst.st_mode))
         return -ENODEV;
 
-    if (kst.st_size <= 0)
-        return -ENODEV;
-
     if (kst.st_size > KBOX_SHADOW_MAX_SIZE)
         return -EFBIG;
 
@@ -52,6 +49,9 @@ int kbox_shadow_create(const struct kbox_sysnrs *s, long lkl_fd)
         close(memfd);
         return -e;
     }
+
+    if (kst.st_size == 0)
+        return memfd;
 
     /* Read from LKL in chunks via pread64 (position-independent)
      * and write to the memfd.

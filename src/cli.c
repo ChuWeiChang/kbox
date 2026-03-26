@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "kbox/cli.h"
+#include "rewrite.h"
 
 /* Long option codes for options without short equivalents */
 enum {
@@ -15,6 +16,7 @@ enum {
     OPT_NET,
     OPT_WEB,
     OPT_WEB_BIND,
+    OPT_SYSCALL_MODE,
     OPT_TRACE_FORMAT,
     OPT_HELP,
 };
@@ -38,6 +40,7 @@ static const struct option image_longopts[] = {
     {"net", no_argument, NULL, OPT_NET},
     {"web", optional_argument, NULL, OPT_WEB},
     {"web-bind", required_argument, NULL, OPT_WEB_BIND},
+    {"syscall-mode", required_argument, NULL, OPT_SYSCALL_MODE},
     {"trace-format", required_argument, NULL, OPT_TRACE_FORMAT},
     {"help", no_argument, NULL, OPT_HELP},
     {NULL, 0, NULL, 0},
@@ -71,6 +74,8 @@ void kbox_usage(const char *argv0)
         "      --forward-verbose      Verbose syscall forwarding\n"
         "      --net                  Enable SLIRP user-mode networking\n"
         "      --mount-profile P      Mount profile: full (default), minimal\n"
+        "      --syscall-mode MODE    Syscall path: auto (default), "
+        "seccomp, trap, rewrite\n"
         "      --web[=PORT]           Enable web observatory (default: 8080)\n"
         "      --web-bind ADDR        Bind address for web (default: "
         "127.0.0.1)\n"
@@ -88,6 +93,7 @@ static void image_defaults(struct kbox_image_args *img)
     img->command = "/bin/sh";
     img->cmdline = "mem=1024M loglevel=4";
     img->mount_profile = KBOX_MOUNT_FULL;
+    img->syscall_mode = KBOX_SYSCALL_MODE_AUTO;
 }
 
 static int parse_image_args(int argc,
@@ -204,6 +210,15 @@ static int parse_image_args(int argc,
                     "(rebuild with KBOX_HAS_WEB=1)\n");
             return -1;
 #endif
+            break;
+        case OPT_SYSCALL_MODE:
+            if (kbox_parse_syscall_mode(optarg, &img->syscall_mode) < 0) {
+                fprintf(stderr,
+                        "unknown syscall mode: %s "
+                        "(use 'seccomp', 'trap', 'rewrite', or 'auto')\n",
+                        optarg);
+                return -1;
+            }
             break;
         case OPT_TRACE_FORMAT:
 #ifdef KBOX_HAS_WEB

@@ -1,6 +1,6 @@
 # kbox
 
-kbox boots a real Linux kernel as an in-process library ([LKL](https://github.com/lkl/linux)) and routes intercepted syscalls to it via [`seccomp_unotify`](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html). It provides a rootless chroot/proot alternative with kernel-level syscall accuracy.
+kbox boots a real Linux kernel as an in-process library ([LKL](https://github.com/lkl/linux)) and routes intercepted syscalls to it. Three interception tiers are available: seccomp-unotify (most compatible), SIGSYS trap (lower latency), and binary rewriting (near-native for process-info syscalls). The default `auto` mode selects the fastest tier that works for a given workload. kbox provides a rootless chroot/proot alternative with kernel-level syscall accuracy.
 
 ## Why kbox
 
@@ -13,43 +13,69 @@ Running Linux userspace programs in a rootless, unprivileged environment require
 
 kbox takes a fundamentally different approach: boot the actual Linux kernel as an in-process library and route intercepted syscalls to it. The kernel that handles your `open()` is the same kernel that runs on servers in production. No reimplementation, no approximation.
 
-The interception mechanism matters too. seccomp-unotify delivers syscall notifications to a supervisor without requiring ptrace attachment or parent-child tracing relationships. The supervisor is just another process with a file descriptor. The tracee's syscall blocks in the kernel until the supervisor responds -- no TOCTOU window, no signal races, no thread-group confusion.
+The interception mechanism matters too. kbox offers three tiers, each trading isolation for speed:
 
-The result: programs get real VFS, real ext4, real procfs -- without root privileges, containers, VMs, or ptrace.
+- **Seccomp-unotify** (Tier 3): syscall notifications delivered to a separate supervisor process via `SECCOMP_RET_USER_NOTIF`. Strongest isolation, lowest overhead for file I/O. The supervisor dispatches to LKL and injects results back via two ioctl round-trips per syscall.
+- **SIGSYS trap** (Tier 1): in-process signal handler intercepts syscalls via `SECCOMP_RET_TRAP`. No cross-process round-trip, but the signal frame build/restore and a service-thread hand-off (eventfd + futex) add overhead. Best for metadata operations on aarch64 where the USER_NOTIF round-trip cost is proportionally higher.
+- **Binary rewriting** (Tier 2): syscall instructions patched to call a trampoline at load time. On aarch64, `SVC #0` is replaced with a `B` branch into a per-site trampoline that calls the dispatch function directly on the guest thread, with zero signal overhead, zero context switches, and zero FS base switching. Stat from the LKL inode cache completes in-process without any kernel round-trip. On x86_64, only 8-byte wrapper sites (`mov $NR; syscall; ret`) are patched; bare 2-byte `syscall` instructions cannot currently be rewritten in-place (the only same-width replacement, `call *%rax`, would jump to the syscall number in RAX), so unpatched sites fall through to the SIGSYS trap path. Process-info syscalls (getpid, gettid) at wrapper sites return virtualized values inline at native speed.
+
+The default `--syscall-mode=auto` selects the fastest tier per architecture. On x86_64, auto uses seccomp (lower per-syscall overhead than trap mode for file I/O). On aarch64, auto uses rewrite/trap for non-shell direct commands (faster metadata via in-process LKL) and seccomp for shell invocations. The selection is based on binary analysis: the main executable is scanned for fork/clone wrapper sites, and binaries that can fork fall back to seccomp to preserve cross-process filesystem coherence.
+
+The result: programs get real VFS, real ext4, real procfs, at near-native syscall speed, without root privileges, containers, VMs, or ptrace.
 
 ## How it works
 
 ```
+     Seccomp mode (--syscall-mode=seccomp, shell commands in auto)
+
                  ┌────────────────┐
-                 │  guest child   │  (seccomp BPF installed)
+                 │  guest child   │  (seccomp BPF: USER_NOTIF)
                  └──────┬─────────┘
                         │ syscall notification
                  ┌──────▼──────────┐          ┌──────────────────┐
                  │  supervisor     │────────▶ │  web observatory │
                  │  (dispatch)     │ counters │  (HTTP + SSE)    │
                  └────┬───────┬────┘ events   └────────┬─────────┘
-          LKL path    │       │  host path             │ /api/snapshot
-          ┌───────────▼──┐ ┌──▼──────────┐             │ /api/events
-          │  LKL kernel  │ │ host kernel │             ▼
-          │  (in-proc)   │ │             │     ┌──────────────┐
-          └──────────────┘ └─────────────┘     │  web browser │
-                                               └──────────────┘
+          LKL path    │       │  host path             │
+          ┌───────────▼──┐ ┌──▼──────────┐             ▼
+          │  LKL kernel  │ │ host kernel │     ┌──────────────┐
+          │  (in-proc)   │ │             │     │  web browser │
+          └──────────────┘ └─────────────┘     └──────────────┘
+
+     Trap mode (--syscall-mode=trap, direct binaries in auto)
+
+                 ┌─────────────────────────────────────────┐
+                 │            single process               │
+                 │  ┌─────────────┐   ┌──────────────────┐ │
+                 │  │ guest code  │──▶│ SIGSYS handler   │ │
+                 │  │ (loaded ELF)│   │ (dispatch thread)│ │
+                 │  └─────────────┘   └───┬────────┬─────┘ │
+                 │              LKL path  │        │ host  │
+                 │          ┌─────────────▼──┐ ┌───▼─────┐ │
+                 │          │  LKL kernel    │ │ host    │ │
+                 │          │  (in-proc)     │ │ kernel  │ │
+                 │          └────────────────┘ └─────────┘ │
+                 └─────────────────────────────────────────┘
 ```
 
 1. The supervisor opens a rootfs disk image and registers it as an LKL block device.
 2. LKL boots a real Linux kernel inside the process (no VM, no separate process tree).
-3. The filesystem is mounted via LKL, and the supervisor sets the guest's virtual root via LKL's internal `chroot`.
-4. A child process is forked with a seccomp BPF filter that delivers all syscalls (except a minimal allow-list: `sendmsg`, `exit`, `exit_group`) as user notifications.
-5. The supervisor receives each notification via `SECCOMP_IOCTL_NOTIF_RECV`, translates paths and file descriptors, and forwards the syscall to either LKL or the host kernel.
-6. Results are injected back via `SECCOMP_IOCTL_NOTIF_SEND`. For FD-returning syscalls (open, pipe, dup), `SECCOMP_IOCTL_NOTIF_ADDFD` injects file descriptors directly into the tracee's FD table.
+3. The filesystem is mounted via LKL, and the supervisor sets the guest's virtual root via LKL's internal chroot.
+4. The launch path depends on the syscall mode:
+   - **Seccomp**: a child process is forked with a BPF filter that delivers syscalls as user notifications. The supervisor receives each notification, dispatches to LKL or the host kernel, and injects results back.
+   - **Trap**: the guest binary is loaded into the current process via a userspace ELF loader. A BPF filter traps guest-range syscalls via `SECCOMP_RET_TRAP`, delivering SIGSYS. A service thread runs the dispatch; the signal handler captures the request and spins until the result is ready. No cross-process round-trip.
+   - **Rewrite**: same as trap, but additionally patches syscall instructions to branch directly into dispatch trampolines, eliminating the SIGSYS signal overhead entirely for patched sites. On **aarch64**, `SVC #0` (4 bytes, fixed-width) is replaced with a `B` branch to a per-site trampoline past the segment end; veneer pages with `LDR+BR` indirect stubs bridge sites beyond ±128MB. The trampoline saves registers, calls the C dispatch function on the guest thread, and returns. No signal frame, no service thread, no context switch. On **x86_64**, only 8-byte wrapper sites (`mov $NR, %eax; syscall; ret`) can be safely patched (to `jmp rel32` targeting a wrapper trampoline); bare 2-byte `syscall`/`sysenter` instructions cannot be rewritten in-place because the replacement `call *%rax` would jump to the syscall number, not a code address. Unpatched x86_64 sites fall through to the SIGSYS trap path. An instruction-boundary-aware length decoder (`x86-decode.c`) ensures the scanner never matches `0F 05` bytes that appear inside longer instructions (immediates, displacements). Site-aware classification labels each site as WRAPPER (eligible for inline virtualized getpid=1, gettid=1) or COMPLEX (must use full dispatch). W^X enforcement blocks simultaneous `PROT_WRITE|PROT_EXEC` in guest memory.
+   - **Auto** (default): selects the fastest tier per architecture. On aarch64, auto uses rewrite/trap for non-shell direct commands whose main executable has no fork/clone wrapper sites (21x faster stat via in-process LKL inode cache). On x86_64, auto uses seccomp (USER_NOTIF overhead is low enough that it beats trap mode's signal + service-thread chain for every measured syscall). Shell invocations always use seccomp. If the selected tier fails at install time, auto falls through to the next tier.
 
 ### Syscall routing
 
 Every intercepted syscall is dispatched to one of three dispositions:
 
-- **LKL forward** (~74 handlers): filesystem operations (open, read, write, stat, getdents, mkdir, unlink, rename), metadata (chmod, chown, utimensat), identity (getuid, setuid, getgroups), and networking (socket, connect). The supervisor reads arguments from tracee memory via `process_vm_readv`, calls into LKL, and writes results back via `process_vm_writev`.
-- **Host CONTINUE** (~34 entries): scheduling (sched_yield, sched_setscheduler), signals (rt_sigaction, kill, tgkill), memory management (mmap, mprotect, brk), I/O multiplexing (epoll, poll, select), threading (futex, clone, set_tid_address), and time (nanosleep, clock_gettime). These work correctly with the host kernel and incur no supervisor overhead.
+- **LKL forward** (~74 handlers): filesystem operations (open, read, write, stat, getdents, mkdir, unlink, rename), metadata (chmod, chown, utimensat), identity (getuid, setuid, getgroups), and networking (socket, connect). In seccomp mode, the supervisor reads arguments from tracee memory via `process_vm_readv` and writes results via `process_vm_writev`. In trap mode, guest memory is accessed directly (same address space) via `process_vm_readv` on self.
+- **Host CONTINUE** (~34 entries): scheduling (sched_yield, sched_setscheduler), signals (rt_sigaction, kill, tgkill), memory management (mmap, mprotect, brk), I/O multiplexing (epoll, poll, select), threading (futex, clone, set_tid_address), and time (nanosleep, clock_gettime). In seccomp mode, the kernel replays the syscall. In trap mode, the dispatch thread re-issues the syscall via an asm trampoline whose instruction pointer is in the BPF allow range.
 - **Emulated**: process identity (getpid returns 1, gettid returns 1), uname (synthetic LKL values), getrandom (LKL `/dev/urandom`), clock_gettime/gettimeofday (host clock, direct passthrough for latency).
+
+All three tiers share the same dispatch engine (`kbox_dispatch_request`). The `kbox_syscall_request` abstraction decouples the dispatch logic from the notification transport: seccomp notifications, SIGSYS signal info, and rewrite trampoline calls all produce the same request struct.
 
 Unknown syscalls receive `ENOSYS`. ~50 dangerous syscalls (mount, reboot, init_module, bpf, ptrace, etc.) are rejected with `EPERM` directly in the BPF filter before reaching the supervisor.
 
@@ -63,7 +89,17 @@ Unknown syscalls receive `ENOSYS`. ~50 dangerous syscalls (mount, reboot, init_m
 
 **ELF extraction** (`elf.c`, `image.c`): binaries are extracted from the LKL filesystem into memfds for `fexecve`. For dynamically-linked binaries, the PT_INTERP segment names an interpreter (e.g., `/lib/ld-musl-x86_64.so.1`) that does not exist on the host. The supervisor extracts the interpreter into a second memfd and patches PT_INTERP in the main binary to `/proc/self/fd/N`. The host kernel resolves this during `load_elf_binary`, before close-on-exec runs.
 
-**Pipe architecture**: `pipe()`/`pipe2()` create real host pipes injected into the tracee via `SECCOMP_IOCTL_NOTIF_ADDFD`. No LKL involvement -- the host kernel manages fork inheritance and close semantics natively. This is why shell pipelines work: both parent and child share real pipe FDs that the host kernel handles.
+**Pipe architecture**: `pipe()`/`pipe2()` create real host pipes injected into the tracee via `SECCOMP_IOCTL_NOTIF_ADDFD`. No LKL involvement; the host kernel manages fork inheritance and close semantics natively. This is why shell pipelines work: both parent and child share real pipe FDs that the host kernel handles.
+
+**Trap fast path** (`syscall-trap.c`, `loader-*.c`): for direct binary commands, kbox loads the guest ELF into the current process via a userspace loader (7 modules: entry, handoff, image, layout, launch, stack, transfer). A BPF filter traps guest-range instruction pointers via `SECCOMP_RET_TRAP`, delivering SIGSYS. The signal handler saves/restores the FS base (FSGSBASE instructions on kernel 5.9+, arch_prctl fallback) so kbox and guest each use their own TLS. A service thread runs the full dispatch; the handler captures the request and spins until the result is ready, keeping heap-allocating code out of signal context. `arch_prctl(SET_FS)` is intercepted to maintain dual TLS state.
+
+**Rewrite engine** (`rewrite.c`, `x86-decode.c`): scans executable PT_LOAD segments for syscall instructions and patches them to branch directly into dispatch trampolines, eliminating the SIGSYS signal overhead for patched sites.
+
+On **aarch64**, `SVC #0` (4 bytes, fixed-width) is replaced with a `B` branch to a per-site trampoline allocated past the segment end. The trampoline saves registers, loads the origin address, and calls the C dispatch function directly on the guest thread. No signal frame, no service thread context switch. Veneer pages with `LDR x16, [PC+8]; BR x16` indirect stubs bridge sites beyond the ±128MB `B`-instruction range, with slot reuse to avoid wasting a full page per veneer. This is why aarch64 rewrite achieves 1us stat (vs 22us in seccomp): the dispatch runs in-process with LKL serving from the inode cache.
+
+On **x86_64**, an instruction-boundary-aware length decoder (`x86-decode.c`) walks true instruction boundaries, eliminating false matches of `0F 05`/`0F 34` bytes inside immediates, displacements, and SIB encodings. Only 8-byte wrapper sites (`mov $NR, %eax; syscall; ret`) are patched to `jmp rel32` targeting a wrapper trampoline that encodes the syscall number and origin address. Bare 2-byte `syscall` instructions are not rewritten because the only same-width replacement (`call *%rax`, `FF D0`) would jump to the syscall number in RAX rather than a code address. Unpatched sites fall through to the SIGSYS trap path. This is why x86_64 rewrite currently offers no advantage over seccomp: most syscalls still take the signal path.
+
+Each site is classified as WRAPPER (simple `syscall; ret` pattern, eligible for inline virtualized return: getpid=1, gettid=1, getppid=0) or COMPLEX (result consumed internally by helpers like `raise()` that feed gettid into tgkill; must use full dispatch). An origin map validates dispatch calls against known rewrite sites and carries the per-site classification. During re-exec (`trap_userspace_exec`), the rewrite runtime is re-installed on the new binary. Multi-threaded guests (`CLONE_THREAD`) are blocked in trap/rewrite mode; use `--syscall-mode=seccomp` for threaded workloads.
 
 ### ABI translation
 
@@ -75,7 +111,7 @@ On aarch64, four `O_*` flags differ between the host and asm-generic: `O_DIRECTO
 
 ## Building
 
-Linux only (host kernel 5.0+ for seccomp-unotify). Requires GCC, GNU Make, and a pre-built `liblkl.a`. No `libseccomp` dependency -- the BPF filter is compiled natively.
+Linux only (host kernel 5.0+ for seccomp-unotify, 5.9+ for FSGSBASE trap optimization). Requires GCC, GNU Make, and a pre-built `liblkl.a`. No `libseccomp` dependency; the BPF filter is compiled natively.
 
 ```bash
 make                        # debug build (ASAN + UBSAN enabled)
@@ -132,6 +168,25 @@ make ARCH=aarch64 CC=aarch64-linux-gnu-gcc rootfs
 ```
 
 Note: use `/bin/sh -i` for interactive sessions. The `-i` flag forces the shell into interactive mode regardless of terminal detection.
+
+### Syscall mode selection
+
+The `--syscall-mode` option controls the interception mechanism:
+
+```bash
+# Auto (default): seccomp on x86_64, rewrite/trap on aarch64 for direct commands
+./kbox image -S alpine.ext4 -- /bin/ls /
+
+# Force seccomp for all workloads (most compatible, handles fork+exec)
+./kbox image -S alpine.ext4 --syscall-mode=seccomp -- /bin/sh -i
+
+# Force trap for single-exec commands (SIGSYS dispatch, no binary patching)
+./kbox image -r alpine.ext4 --syscall-mode=trap -- /bin/cat /etc/hostname
+
+# Force rewrite (aarch64: patches SVC to branch trampolines, fastest stat;
+#                x86_64: patches wrapper sites, bare syscalls fall back to trap)
+./kbox image -r alpine.ext4 --syscall-mode=rewrite -- /opt/tests/bench-test 200
+```
 
 Run `./kbox image --help` for the full option list.
 
@@ -196,7 +251,7 @@ make check-integration      # integration tests against a rootfs image
 make check-stress           # stress test programs
 ```
 
-Unit tests (82 tests) have no LKL dependency and run on any Linux host. Integration tests (43 tests) run guest binaries inside kbox against an Alpine ext4 image. Stress tests exercise fork storms, FD exhaustion, concurrent I/O, signal races, and long-running processes.
+Unit tests (portable subset runs on macOS, full suite on Linux) have no LKL dependency. Linux-only tests cover the trap runtime, userspace loader, rewrite engine, x86-64 instruction decoder, site classification, procmem, and syscall request decoding. The x86 decoder tests verify instruction length correctness across all major encoding formats and validate that embedded `0F 05` bytes inside longer instructions are not misidentified as syscalls. Integration tests run guest binaries inside kbox against an Alpine ext4 image. Stress tests exercise fork storms, FD exhaustion, concurrent I/O, signal races, and long-running processes.
 
 All tests run clean under ASAN and UBSAN. Guest binaries are compiled without sanitizers (shadow memory interferes with `process_vm_readv`).
 

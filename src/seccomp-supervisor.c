@@ -229,27 +229,30 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
 {
     struct kbox_seccomp_notif notif;
     struct kbox_seccomp_notif_resp resp;
+    struct kbox_syscall_request req;
     struct kbox_dispatch d;
     struct pollfd pfd;
     int exit_code;
     int ret;
+    int poll_timeout;
+
+    poll_timeout = -1;
+#ifdef KBOX_HAS_WEB
+    if (ctx->web)
+        poll_timeout = 100;
+#endif
 
     for (;;) {
-        /* 1. Check if child already exited. */
-        ret = check_child(ctx->child_pid, &exit_code);
-        if (ret < 0) {
-            fprintf(stderr, "waitpid: %s\n", strerror(errno));
-            return -1;
-        }
-        if (ret == 1)
-            return exit_code;
-
-        /* 2. Poll for a seccomp notification. */
+        /* Poll for the next seccomp notification. In the normal non-web
+         * steady state we block here instead of doing a non-blocking
+         * waitpid() on every iteration; that extra wait syscall shows up
+         * directly in the seccomp fast path on syscall-heavy workloads.
+         */
         pfd.fd = ctx->listener_fd;
         pfd.events = POLLIN;
         pfd.revents = 0;
 
-        ret = poll(&pfd, 1, 100);
+        ret = poll(&pfd, 1, poll_timeout);
         if (ret < 0) {
             if (errno == EINTR)
                 continue;
@@ -268,15 +271,19 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
             continue;
         }
 
-        /* 3. POLLHUP / POLLERR => recheck child. */
+        /* POLLHUP / POLLERR => recheck child. */
         if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
             ret = check_child(ctx->child_pid, &exit_code);
+            if (ret < 0) {
+                fprintf(stderr, "waitpid: %s\n", strerror(errno));
+                return -1;
+            }
             if (ret == 1)
                 return exit_code;
             continue;
         }
 
-        /* 4. Receive notification. */
+        /* Receive notification. */
         ret = kbox_notify_recv(ctx->listener_fd, &notif);
         if (ret < 0) {
             int e = -ret;
@@ -285,6 +292,15 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
                 if (e == ENOENT && ctx->web)
                     kbox_web_counters(ctx->web)->recv_enoent++;
 #endif
+                if (e == ENOENT) {
+                    ret = check_child(ctx->child_pid, &exit_code);
+                    if (ret < 0) {
+                        fprintf(stderr, "waitpid: %s\n", strerror(errno));
+                        return -1;
+                    }
+                    if (ret == 1)
+                        return exit_code;
+                }
                 continue;
             }
             fprintf(stderr, "kbox_notify_recv: %s\n", strerror(e));
@@ -297,7 +313,11 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
         if (ctx->web)
             t_dispatch_start = kbox_clock_ns();
 #endif
-        d = kbox_dispatch_syscall(ctx, &notif);
+        if (kbox_syscall_request_from_notif(&notif, &req) < 0) {
+            fprintf(stderr, "kbox: failed to decode seccomp notification\n");
+            return -1;
+        }
+        d = kbox_dispatch_request(ctx, &req);
 
         /* 6. Build and send response. */
         build_response(&resp, notif.id, &d);
@@ -316,12 +336,10 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
             else
                 disp = KBOX_DISP_RETURN;
 
-            const char *sname =
-                syscall_name_from_nr(ctx->host_nrs, notif.data.nr);
+            const char *sname = syscall_name_from_nr(ctx->host_nrs, req.nr);
 
-            kbox_web_record_syscall(ctx->web, notif.pid, notif.data.nr, sname,
-                                    notif.data.args, disp, d.val, d.error,
-                                    latency);
+            kbox_web_record_syscall(ctx->web, (uint32_t) req.pid, req.nr, sname,
+                                    req.args, disp, d.val, d.error, latency);
         }
 #endif
 
@@ -338,6 +356,13 @@ static int supervise_loop(struct kbox_supervisor_ctx *ctx)
                 if (e == ENOENT && ctx->web)
                     kbox_web_counters(ctx->web)->send_enoent++;
 #endif
+                ret = check_child(ctx->child_pid, &exit_code);
+                if (ret < 0) {
+                    fprintf(stderr, "waitpid: %s\n", strerror(errno));
+                    return -1;
+                }
+                if (ret == 1)
+                    return exit_code;
                 continue;
             }
             fprintf(stderr, "kbox_notify_send: %s\n", strerror(e));
@@ -507,6 +532,8 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
     ctx.host_nrs = host_nrs;
     ctx.fd_table = &fd_table;
     ctx.listener_fd = listener_fd;
+    ctx.proc_self_fd_dirfd = -1;
+    ctx.proc_mem_fd = -1;
     ctx.child_pid = pid;
     ctx.host_root = host_root;
     ctx.verbose = verbose;
@@ -514,11 +541,17 @@ int kbox_run_supervisor(const struct kbox_sysnrs *sysnrs,
     ctx.override_uid = (uid_t) -1;
     ctx.override_gid = (gid_t) -1;
     ctx.normalize = normalize;
+    ctx.guest_mem_ops = &kbox_process_vm_guest_mem_ops;
+    ctx.fd_inject_ops = NULL;
     ctx.web = web;
 
     /* 4c. Enter supervisor loop. */
     exit_code = supervise_loop(&ctx);
 
+    if (ctx.proc_mem_fd >= 0)
+        close(ctx.proc_mem_fd);
+    if (ctx.proc_self_fd_dirfd >= 0)
+        close(ctx.proc_self_fd_dirfd);
     close(listener_fd);
 
     if (exit_code < 0)

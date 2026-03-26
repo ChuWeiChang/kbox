@@ -16,29 +16,37 @@ struct kbox_sysnrs; /* forward declaration */
 
 #define KBOX_FD_BASE 32768
 #define KBOX_FD_TABLE_MAX 4096
+#define KBOX_FD_FAST_BASE (KBOX_FD_BASE + (KBOX_FD_TABLE_MAX / 2))
+#define KBOX_FD_HOSTONLY_BASE (KBOX_FD_BASE + ((KBOX_FD_TABLE_MAX * 3) / 4))
 /* redirect slots for FDs 0..1023 (dup2 targets) */
 #define KBOX_LOW_FD_MAX 1024
 #define KBOX_FD_TABLE_CAPACITY (KBOX_FD_TABLE_MAX + KBOX_LOW_FD_MAX)
 
 struct kbox_fd_entry {
-    long lkl_fd;    /* LKL-internal FD, -1 if slot is free */
-    long host_fd;   /* host memfd shadow / tracee FD number, -1 if none */
-    int shadow_sp;  /* supervisor's dup of shadow socket sp[1], -1 if none.
-                     * Kept alive so dup/dup2/dup3 can inject new copies into
-                     * the tracee via ADDFD.
-                     */
-    int mirror_tty; /* 1 if this FD mirrors a host TTY */
-    int cloexec;    /* O_CLOEXEC tracking */
+    long lkl_fd;   /* LKL-internal FD, -1 if slot is free */
+    long host_fd;  /* host memfd shadow / tracee FD number, -1 if none */
+    int shadow_sp; /* supervisor's dup of shadow socket sp[1], -1 if none.
+                    * Kept alive so dup/dup2/dup3 can inject new copies into
+                    * the tracee via ADDFD.
+                    */
+    int shadow_writeback; /* 1 if shadow_sp must be synced back to lkl_fd */
+    int mirror_tty;       /* 1 if this FD mirrors a host TTY */
+    int cloexec;          /* O_CLOEXEC tracking */
 };
 
 struct kbox_fd_table {
     struct kbox_fd_entry entries[KBOX_FD_TABLE_MAX];
     struct kbox_fd_entry low_fds[KBOX_LOW_FD_MAX]; /* dup2 redirect slots */
-    long next_fd; /* Next virtual FD to allocate */
+    long next_fd;          /* Next virtual FD to allocate */
+    long next_fast_fd;     /* Next host-shadow fast FD to allocate */
+    long next_hostonly_fd; /* Next host-only cached-shadow FD to allocate */
 };
 
 void kbox_fd_table_init(struct kbox_fd_table *t);
 long kbox_fd_table_insert(struct kbox_fd_table *t, long lkl_fd, int mirror_tty);
+long kbox_fd_table_insert_fast(struct kbox_fd_table *t,
+                               long lkl_fd,
+                               int mirror_tty);
 int kbox_fd_table_insert_at(struct kbox_fd_table *t,
                             long fd,
                             long lkl_fd,

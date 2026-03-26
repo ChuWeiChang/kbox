@@ -127,37 +127,6 @@ void kbox_event_push_syscall(struct kbox_event_ring *ring,
     ring_push_routine(ring, &e);
 }
 
-
-/* JSON string escaping. */
-
-/* Escape a string for safe JSON embedding.
- * Handles: " \ and control characters (< 0x20).
- * Returns bytes written (not including NUL).
- */
-static int json_escape(const char *src, char *dst, int dstsz)
-{
-    int pos = 0;
-    if (!src) {
-        if (dstsz > 0)
-            dst[0] = '\0';
-        return 0;
-    }
-    for (; *src && pos < dstsz - 6; src++) {
-        unsigned char c = (unsigned char) *src;
-        if (c == '"' || c == '\\') {
-            dst[pos++] = '\\';
-            dst[pos++] = (char) c;
-        } else if (c < 0x20) {
-            pos += snprintf(dst + pos, (size_t) (dstsz - pos), "\\u%04x", c);
-        } else {
-            dst[pos++] = (char) c;
-        }
-    }
-    if (pos < dstsz)
-        dst[pos] = '\0';
-    return pos;
-}
-
 /* Event JSON serialization. */
 
 int kbox_event_to_json(const struct kbox_event *evt, char *buf, int bufsz)

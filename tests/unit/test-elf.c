@@ -1,8 +1,89 @@
 /* SPDX-License-Identifier: MIT */
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "kbox/elf.h"
 #include "test-runner.h"
+
+#define ET_EXEC 2
+#define ET_DYN 3
+#define PT_LOAD 1
+#define PT_INTERP 3
+#define PT_PHDR 6
+#define PT_GNU_STACK 0x6474e551u
+#define PF_X 0x1
+#define PF_W 0x2
+#define PF_R 0x4
+
+static void set_le16(unsigned char *p, uint16_t v)
+{
+    p[0] = (unsigned char) (v & 0xff);
+    p[1] = (unsigned char) ((v >> 8) & 0xff);
+}
+
+static void set_le32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char) (v & 0xff);
+    p[1] = (unsigned char) ((v >> 8) & 0xff);
+    p[2] = (unsigned char) ((v >> 16) & 0xff);
+    p[3] = (unsigned char) ((v >> 24) & 0xff);
+}
+
+static void set_le64(unsigned char *p, uint64_t v)
+{
+    for (int i = 0; i < 8; i++)
+        p[i] = (unsigned char) ((v >> (i * 8)) & 0xff);
+}
+
+static void init_elf64(unsigned char *buf,
+                       size_t buf_size,
+                       uint16_t type,
+                       uint16_t machine,
+                       uint64_t entry,
+                       uint64_t phoff,
+                       uint16_t phnum)
+{
+    memset(buf, 0, buf_size);
+    buf[0] = 0x7f;
+    buf[1] = 'E';
+    buf[2] = 'L';
+    buf[3] = 'F';
+    buf[4] = 2;
+    buf[5] = 1;
+    buf[6] = 1;
+    set_le16(buf + 16, type);
+    set_le16(buf + 18, machine);
+    set_le32(buf + 20, 1);
+    set_le64(buf + 24, entry);
+    set_le64(buf + 32, phoff);
+    set_le16(buf + 52, 64);
+    set_le16(buf + 54, 56);
+    set_le16(buf + 56, phnum);
+}
+
+static void set_phdr(unsigned char *buf,
+                     size_t index,
+                     uint32_t type,
+                     uint32_t flags,
+                     uint64_t offset,
+                     uint64_t vaddr,
+                     uint64_t filesz,
+                     uint64_t memsz,
+                     uint64_t align)
+{
+    unsigned char *ph = buf + 64 + index * 56;
+
+    set_le32(ph + 0, type);
+    set_le32(ph + 4, flags);
+    set_le64(ph + 8, offset);
+    set_le64(ph + 16, vaddr);
+    set_le64(ph + 32, filesz);
+    set_le64(ph + 40, memsz);
+    set_le64(ph + 48, align);
+}
 
 /* Minimal 64-bit little-endian ELF with one PT_INTERP program header. */
 static const unsigned char elf_with_interp[] = {
@@ -356,6 +437,145 @@ static void test_elf_find_interp_loc_static(void)
     ASSERT_EQ(filesz, 0);
 }
 
+static void test_elf_read_header_window_fd(void)
+{
+    char path[128];
+    unsigned char *buf = NULL;
+    size_t buf_len = 0;
+    int fd = test_mkstemp(path, sizeof(path), "kbox-elf-unit");
+
+    ASSERT_TRUE(fd >= 0);
+    unlink(path);
+    ASSERT_EQ(write(fd, elf_with_interp, sizeof(elf_with_interp)),
+              (long) sizeof(elf_with_interp));
+    ASSERT_EQ(kbox_read_elf_header_window_fd(fd, &buf, &buf_len), 0);
+    ASSERT_EQ(buf_len, sizeof(elf_with_interp));
+    ASSERT_EQ(memcmp(buf, elf_with_interp, buf_len), 0);
+    munmap(buf, buf_len);
+    close(fd);
+}
+
+static void test_elf_read_header_window_fd_large_phoff(void)
+{
+    unsigned char elf[5000];
+    char path[128];
+    unsigned char *buf = NULL;
+    size_t buf_len = 0;
+    int fd;
+
+    memset(elf, 0, sizeof(elf));
+    memcpy(elf, elf_with_interp, 64);
+    /* Move phoff to 4096 and keep one PT_INTERP entry there. */
+    elf[32] = 0x00;
+    elf[33] = 0x10;
+    elf[34] = 0x00;
+    elf[35] = 0x00;
+    elf[36] = 0x00;
+    elf[37] = 0x00;
+    elf[38] = 0x00;
+    elf[39] = 0x00;
+    memcpy(elf + 4096, elf_with_interp + 64, 56);
+    fd = test_mkstemp(path, sizeof(path), "kbox-elf-unit");
+
+    ASSERT_TRUE(fd >= 0);
+    unlink(path);
+    ASSERT_EQ(write(fd, elf, sizeof(elf)), (long) sizeof(elf));
+    ASSERT_EQ(kbox_read_elf_header_window_fd(fd, &buf, &buf_len), 0);
+    ASSERT_EQ(buf_len, 4152);
+    ASSERT_EQ(memcmp(buf, elf, buf_len), 0);
+    munmap(buf, buf_len);
+    close(fd);
+}
+
+static void test_elf_build_load_plan_exec(void)
+{
+    unsigned char elf[1024];
+    struct kbox_elf_load_plan plan;
+
+    init_elf64(elf, sizeof(elf), ET_EXEC, 0x3e, 0x401020, 64, 3);
+    set_phdr(elf, 0, PT_LOAD, PF_R | PF_X, 0, 0x400000, 0x200, 0x300, 0x1000);
+    set_phdr(elf, 1, PT_LOAD, PF_R | PF_W, 0x200, 0x401000, 0x80, 0x200,
+             0x1000);
+    set_phdr(elf, 2, PT_INTERP, 0, 0x180, 0, 8, 8, 1);
+    memcpy(elf + 0x180, "/ld.so\0", 8);
+
+    ASSERT_EQ(kbox_build_elf_load_plan(elf, sizeof(elf), 0x1000, &plan), 0);
+    ASSERT_EQ(plan.machine, 0x3e);
+    ASSERT_EQ(plan.type, ET_EXEC);
+    ASSERT_EQ(plan.entry, 0x401020);
+    ASSERT_EQ(plan.segment_count, 2);
+    ASSERT_EQ(plan.pie, 0);
+    ASSERT_EQ(plan.has_interp, 1);
+    ASSERT_EQ(plan.interp_offset, 0x180);
+    ASSERT_EQ(plan.interp_size, 8);
+    ASSERT_EQ(plan.phdr_vaddr, 0x400040);
+    ASSERT_EQ(plan.min_vaddr, 0x400000);
+    ASSERT_EQ(plan.max_vaddr, 0x402000);
+    ASSERT_EQ(plan.load_size, 0x2000);
+    ASSERT_EQ(plan.segments[0].map_start, 0x400000);
+    ASSERT_EQ(plan.segments[0].map_offset, 0);
+    ASSERT_EQ(plan.segments[0].map_size, 0x1000);
+    ASSERT_EQ(plan.segments[1].map_start, 0x401000);
+    ASSERT_EQ(plan.segments[1].map_offset, 0);
+    ASSERT_EQ(plan.segments[1].map_size, 0x1000);
+}
+
+static void test_elf_build_load_plan_pie_with_phdr_and_stack(void)
+{
+    unsigned char elf[1024];
+    struct kbox_elf_load_plan plan;
+
+    init_elf64(elf, sizeof(elf), ET_DYN, 0xb0, 0x120, 64, 4);
+    set_phdr(elf, 0, PT_PHDR, PF_R, 64, 0x40, 224, 224, 8);
+    set_phdr(elf, 1, PT_LOAD, PF_R | PF_X, 0, 0, 0x220, 0x220, 0x1000);
+    set_phdr(elf, 2, PT_LOAD, PF_R | PF_W, 0x220, 0x2000, 0x40, 0x100, 0x1000);
+    set_phdr(elf, 3, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
+
+    ASSERT_EQ(kbox_build_elf_load_plan(elf, sizeof(elf), 0x1000, &plan), 0);
+    ASSERT_EQ(plan.machine, 0xb0);
+    ASSERT_EQ(plan.type, ET_DYN);
+    ASSERT_EQ(plan.pie, 1);
+    ASSERT_EQ(plan.phdr_vaddr, 0x40);
+    ASSERT_EQ(plan.stack_flags, PF_R | PF_W);
+    ASSERT_EQ(plan.segment_count, 2);
+    ASSERT_EQ(plan.min_vaddr, 0);
+    ASSERT_EQ(plan.max_vaddr, 0x3000);
+    ASSERT_EQ(plan.load_size, 0x3000);
+}
+
+static void test_elf_build_load_plan_honors_large_segment_align(void)
+{
+    unsigned char *elf;
+    size_t elf_len = 0xb1000;
+    struct kbox_elf_load_plan plan;
+
+    elf = calloc(1, elf_len);
+    ASSERT_NE(elf, NULL);
+    init_elf64(elf, elf_len, ET_DYN, 0xb7, 0x696cc, 64, 2);
+    set_phdr(elf, 0, PT_LOAD, PF_R | PF_X, 0, 0, 0xa19f4, 0xa19f4, 0x10000);
+    set_phdr(elf, 1, PT_LOAD, PF_R | PF_W, 0xafb00, 0xbfb00, 0x904, 0x3410,
+             0x10000);
+
+    ASSERT_EQ(kbox_build_elf_load_plan(elf, elf_len, 0x1000, &plan), 0);
+    ASSERT_EQ(plan.segment_count, 2);
+    ASSERT_EQ(plan.segments[1].map_offset, 0xa0000);
+    ASSERT_EQ(plan.segments[1].map_start, 0xb0000);
+    ASSERT_EQ(plan.segments[1].map_size, 0x20000);
+    ASSERT_EQ(plan.max_vaddr, 0xd0000);
+    free(elf);
+}
+
+static void test_elf_build_load_plan_rejects_filesz_gt_memsz(void)
+{
+    unsigned char elf[256];
+    struct kbox_elf_load_plan plan;
+
+    init_elf64(elf, sizeof(elf), ET_EXEC, 0x3e, 0x400000, 64, 1);
+    set_phdr(elf, 0, PT_LOAD, PF_R | PF_X, 0, 0x400000, 0x200, 0x100, 0x1000);
+
+    ASSERT_EQ(kbox_build_elf_load_plan(elf, sizeof(elf), 0x1000, &plan), -1);
+}
+
 void test_elf_init(void)
 {
     TEST_REGISTER(test_elf_parse_interp);
@@ -365,4 +585,10 @@ void test_elf_init(void)
     TEST_REGISTER(test_elf_32bit_rejected);
     TEST_REGISTER(test_elf_find_interp_loc);
     TEST_REGISTER(test_elf_find_interp_loc_static);
+    TEST_REGISTER(test_elf_read_header_window_fd);
+    TEST_REGISTER(test_elf_read_header_window_fd_large_phoff);
+    TEST_REGISTER(test_elf_build_load_plan_exec);
+    TEST_REGISTER(test_elf_build_load_plan_pie_with_phdr_and_stack);
+    TEST_REGISTER(test_elf_build_load_plan_honors_large_segment_align);
+    TEST_REGISTER(test_elf_build_load_plan_rejects_filesz_gt_memsz);
 }

@@ -207,9 +207,9 @@ ASAN_OPTIONS=detect_leaks=0 gdb --args ./kbox image -S alpine.ext4 -c /bin/sh
 ## Coordinated Syscall Tracing
 
 The `kbox-syscall-trace` command sets breakpoints on three points:
-1. `kbox_dispatch_syscall` -- seccomp notification entry
-2. `lkl_syscall` -- LKL kernel entry
-3. `lkl_syscall6` -- LKL wrapper
+1. `kbox_dispatch_syscall`: seccomp dispatch entry
+2. `lkl_syscall`: LKL kernel entry
+3. `lkl_syscall6`: LKL wrapper
 
 On each hit, it prints the syscall number, decoded name, arguments,
 virtual FD translation (if applicable), and LKL parameters:

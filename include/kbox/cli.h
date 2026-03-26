@@ -15,6 +15,13 @@ enum kbox_mode {
     KBOX_MODE_IMAGE,
 };
 
+enum kbox_syscall_mode {
+    KBOX_SYSCALL_MODE_SECCOMP,
+    KBOX_SYSCALL_MODE_TRAP,
+    KBOX_SYSCALL_MODE_REWRITE,
+    KBOX_SYSCALL_MODE_AUTO,
+};
+
 struct kbox_image_args {
     const char *root_dir; /* -r: image file path */
     bool recommended;     /* -R: enable recommended mounts */
@@ -34,6 +41,7 @@ struct kbox_image_args {
     bool verbose;                          /* --forward-verbose */
     bool net;                              /* --net: enable SLIRP networking */
     enum kbox_mount_profile mount_profile; /* --mount-profile */
+    enum kbox_syscall_mode syscall_mode;   /* --syscall-mode */
     bool web;                              /* --web: enable web observatory */
     int web_port;                          /* --web=PORT (default 8080) */
     const char *web_bind;                  /* --web-bind ADDR */

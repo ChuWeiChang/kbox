@@ -8,14 +8,16 @@
 
 #include "syscall-nr.h"
 
+struct lkl_dev_blk_ops;
+
 struct lkl_disk {
     void *dev;
     int fd;
-    void *ops;
+    struct lkl_dev_blk_ops *ops;
 };
 
 extern unsigned char lkl_host_ops;
-extern void lkl_dev_blk_ops;
+extern struct lkl_dev_blk_ops lkl_dev_blk_ops;
 
 int lkl_init(void *ops);
 int lkl_start_kernel(const char *fmt, ...);

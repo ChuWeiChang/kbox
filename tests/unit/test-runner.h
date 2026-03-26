@@ -14,6 +14,7 @@
 typedef void (*test_fn)(void);
 
 void test_register(const char *name, test_fn fn);
+int test_mkstemp(char *path, size_t path_len, const char *name);
 void test_fail(const char *file, int line, const char *expr);
 void test_fail_eq_long(const char *file,
                        int line,
