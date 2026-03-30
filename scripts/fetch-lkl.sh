@@ -13,27 +13,15 @@
 
 set -eu
 
-# Auto-detect architecture.
-case "${1:-$(uname -m)}" in
-    x86_64 | amd64) ARCH="x86_64" ;;
-    aarch64 | arm64) ARCH="aarch64" ;;
-    *)
-        echo "error: unsupported architecture: ${1:-$(uname -m)}" >&2
-        exit 1
-        ;;
-esac
+. "$(cd "$(dirname "$0")" && pwd)/common.sh"
+
+detect_arch "${1:-}"
 
 LKL_DIR="${LKL_DIR:-lkl-${ARCH}}"
 REPO="${KBOX_REPO:-sysprog21/kbox}"
 NIGHTLY_TAG="${KBOX_LKL_TAG:-lkl-nightly}"
 ASSET="liblkl-${ARCH}.tar.gz"
 SHA256_FILE="scripts/lkl-sha256.txt"
-
-die()
-{
-    echo "error: $*" >&2
-    exit 1
-}
 
 mkdir -p "$LKL_DIR"
 
@@ -54,18 +42,7 @@ try_release()
     echo "Downloading ${URL}..."
     curl -fSL -o "${LKL_DIR}/${ASSET}" "$URL" || return 1
 
-    # Verify SHA256 if pinfile has an entry for this asset.
-    if [ -f "$SHA256_FILE" ]; then
-        EXPECTED=$(grep "$ASSET" "$SHA256_FILE" | awk '{print $1}')
-        if [ -n "$EXPECTED" ]; then
-            ACTUAL=$(sha256sum "${LKL_DIR}/${ASSET}" | awk '{print $1}')
-            if [ "$ACTUAL" != "$EXPECTED" ]; then
-                rm -f "${LKL_DIR}/${ASSET}"
-                die "SHA256 mismatch for ${ASSET}"
-            fi
-            echo "SHA256 verified."
-        fi
-    fi
+    verify_sha256 "${LKL_DIR}/${ASSET}" "$SHA256_FILE" "$ASSET"
 
     tar xzf "${LKL_DIR}/${ASSET}" -C "$LKL_DIR"
     rm -f "${LKL_DIR}/${ASSET}"
@@ -88,6 +65,8 @@ try_gh()
         rm -rf "$TMPDIR"
         return 1
     }
+
+    verify_sha256 "${TMPDIR}/${ASSET}" "$SHA256_FILE" "$ASSET"
 
     tar xzf "${TMPDIR}/${ASSET}" -C "$LKL_DIR"
     rm -rf "$TMPDIR"

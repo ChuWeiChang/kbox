@@ -7,16 +7,12 @@
 
 set -eu
 
+. "$(cd "$(dirname "$0")" && pwd)/common.sh"
+
 ARCH="${1:-x86_64}"
 BUSYBOX_VERSION="${BUSYBOX_VERSION:-1.36.1}"
 OUTDIR="deps"
 OUTFILE="${OUTDIR}/busybox"
-
-die()
-{
-    echo "error: $*" >&2
-    exit 1
-}
 
 case "$ARCH" in
     x86_64)
@@ -38,14 +34,7 @@ if [ -x "$OUTFILE" ]; then
 fi
 
 echo "Downloading busybox ${BUSYBOX_VERSION} (${ARCH})..."
-
-if command -v curl > /dev/null 2>&1; then
-    curl -fL -o "$OUTFILE" "$URL" || die "curl download failed"
-elif command -v wget > /dev/null 2>&1; then
-    wget -q -O "$OUTFILE" "$URL" || die "wget download failed"
-else
-    die "Neither curl nor wget found."
-fi
+download_file "$URL" "$OUTFILE"
 
 chmod +x "$OUTFILE"
 echo "OK: ${OUTFILE}"

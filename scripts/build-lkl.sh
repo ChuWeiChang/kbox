@@ -11,23 +11,49 @@
 
 set -eu
 
-case "${1:-$(uname -m)}" in
-    x86_64 | amd64) ARCH="x86_64" ;;
-    aarch64 | arm64) ARCH="aarch64" ;;
-    *)
-        echo "error: unsupported architecture: ${1:-$(uname -m)}" >&2
-        exit 1
-        ;;
-esac
+. "$(cd "$(dirname "$0")" && pwd)/common.sh"
+
+detect_arch "${1:-}"
 
 LKL_DIR="${LKL_DIR:-lkl-${ARCH}}"
 LKL_SRC="${LKL_SRC:-build/lkl-src}"
 LKL_UPSTREAM="https://github.com/lkl/linux"
 
-die()
+is_commit_sha()
 {
-    echo "error: $*" >&2
-    exit 1
+    case "$1" in
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+            case "$1" in
+                *[!0-9a-fA-F]*)
+                    return 1
+                    ;;
+            esac
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+checkout_lkl_ref()
+{
+    ref="$1"
+
+    echo "  CHECKOUT ${ref}"
+    if is_commit_sha "$ref"; then
+        # Bare commit SHAs are not advertised as remote refs, so a shallow
+        # ref fetch is not reliable. Ensure full history before checkout.
+        if git -C "${LKL_SRC}" rev-parse --is-shallow-repository > /dev/null 2>&1 \
+            && [ "$(git -C "${LKL_SRC}" rev-parse --is-shallow-repository)" = "true" ]; then
+            git -C "${LKL_SRC}" fetch --unshallow origin
+        else
+            git -C "${LKL_SRC}" fetch origin
+        fi
+        git -C "${LKL_SRC}" checkout "${ref}"
+    else
+        git -C "${LKL_SRC}" fetch --depth=1 origin "${ref}"
+        git -C "${LKL_SRC}" checkout FETCH_HEAD
+    fi
 }
 
 # ---- Clone or update source tree ----------------------------------------
@@ -35,21 +61,24 @@ die()
 if [ -d "${LKL_SRC}/.git" ]; then
     echo "  SRC     ${LKL_SRC} (exists, skipping clone)"
     if [ -n "${LKL_REF:-}" ]; then
-        echo "  CHECKOUT ${LKL_REF}"
-        git -C "${LKL_SRC}" fetch --depth=1 origin "${LKL_REF}"
-        git -C "${LKL_SRC}" checkout FETCH_HEAD
+        checkout_lkl_ref "${LKL_REF}"
     fi
 else
     echo "  CLONE   ${LKL_UPSTREAM} -> ${LKL_SRC}"
     mkdir -p "$(dirname "${LKL_SRC}")"
 
-    if [ -n "${LKL_REF:-}" ]; then
-        # Shallow clone of a specific ref.
-        git clone --depth=1 --branch "${LKL_REF}" \
-            "${LKL_UPSTREAM}" "${LKL_SRC}"
+    if [ -n "${LKL_REF:-}" ] && is_commit_sha "${LKL_REF}"; then
+        # Commit SHAs require full history because remotes typically do not
+        # advertise arbitrary object IDs as shallow-fetchable refs.
+        git clone "${LKL_UPSTREAM}" "${LKL_SRC}"
+        checkout_lkl_ref "${LKL_REF}"
     else
-        # Shallow clone of default branch.
+        # Shallow clone of default branch, then checkout specific branch/tag if
+        # requested. git clone --branch does not accept bare commit SHAs.
         git clone --depth=1 "${LKL_UPSTREAM}" "${LKL_SRC}"
+        if [ -n "${LKL_REF:-}" ]; then
+            checkout_lkl_ref "${LKL_REF}"
+        fi
     fi
 fi
 

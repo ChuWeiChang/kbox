@@ -1,14 +1,14 @@
 # Build kbox and run full test suite.
 # Zero root required -- everything runs as an unprivileged user.
 #
-# Parallelism (5 independent jobs, 1 sequential):
-#   coding-style     -- clang-format + newline checks (fast)
-#   static-analysis  -- security patterns + cppcheck
-#   unit-tests       -- no LKL dependency, ASAN/UBSAN
-#   build-kbox       -- fetches LKL, compiles kbox + guest/stress bins, builds rootfs
-#   integration      -- needs build-kbox artifacts, runs integration + stress tests
+# Parallelism (4 independent jobs, 1 sequential):
+#   commit-hygiene -- Change-Id + subject format (needs full history)
+#   lint           -- clang-format, newline, security, cppcheck (one apt install)
+#   unit-tests     -- no LKL dependency, ASAN/UBSAN
+#   build-kbox     -- fetches LKL, compiles kbox + guest/stress bins, builds rootfs
+#   integration    -- needs build-kbox artifacts, runs integration + stress tests
 #
-# coding-style, static-analysis, unit-tests, and build-kbox run in parallel.
+# commit-hygiene, lint, unit-tests, and build-kbox run in parallel.
 # integration-tests waits for build-kbox only.
 name: Build and Test
 
@@ -49,35 +49,30 @@ jobs:
             scripts/check-commitlog.sh
           fi
 
-  # ---- Coding style: formatting checks (fast, ~10s) ----
-  coding-style:
+  # ---- Lint: formatting + static analysis (consolidated, one apt install) ----
+  lint:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install clang-format
+      - name: Cache apt packages
+        uses: actions/cache@v5
+        with:
+          path: ~/apt-cache
+          key: apt-lint-${{ runner.os }}-${{ hashFiles('.github/workflows/build-kbox.yml') }}
+      - name: Install tools
         run: |
+          mkdir -p ~/apt-cache
           sudo apt-get update
-          sudo apt-get install -y clang-format-20
+          sudo apt-get install -y -o Dir::Cache::Archives=$HOME/apt-cache \
+            clang-format-20 cppcheck
 
       - name: Check trailing newline
         run: .ci/check-newline.sh
 
       - name: Check clang-format
         run: .ci/check-format.sh
-
-  # ---- Static analysis: security patterns + cppcheck ----
-  static-analysis:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install cppcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cppcheck
 
       - name: Security checks
         run: .ci/check-security.sh
@@ -92,11 +87,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-
       - name: Run unit tests (ASAN/UBSAN)
         run: make check-unit
 
@@ -107,10 +97,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Cache apt packages
+        uses: actions/cache@v5
+        with:
+          path: ~/apt-cache
+          key: apt-build-${{ runner.os }}-${{ hashFiles('.github/workflows/build-kbox.yml') }}
       - name: Install dependencies
         run: |
+          mkdir -p ~/apt-cache
           sudo apt-get update
-          sudo apt-get install -y build-essential e2fsprogs
+          sudo apt-get install -y -o Dir::Cache::Archives=$HOME/apt-cache \
+            e2fsprogs
 
       - name: Fetch prebuilt LKL
         run: ./scripts/fetch-lkl.sh
@@ -122,7 +119,7 @@ jobs:
           path: |
             alpine.ext4
             deps/
-          key: rootfs-${{ hashFiles('scripts/alpine-sha256.txt', 'scripts/mkrootfs.sh', 'tests/guest/*.c', 'tests/stress/*.c', 'Makefile') }}
+          key: rootfs-${{ hashFiles('scripts/alpine-sha256.txt', 'scripts/common.sh', 'scripts/mkrootfs.sh', 'tests/guest/*.c', 'tests/stress/*.c', 'Makefile') }}
 
       - name: Configure (defconfig)
         run: make defconfig
@@ -148,7 +145,6 @@ jobs:
             tests/guest/*-test
             tests/stress/*
             !tests/stress/*.c
-            scripts/
 
   # ---- Integration + stress tests: needs kbox binary + rootfs ----
   integration-tests:
@@ -169,7 +165,6 @@ jobs:
           chmod +x kbox
           chmod +x tests/guest/*-test 2>/dev/null || true
           chmod +x tests/stress/* 2>/dev/null || true
-          chmod +x scripts/*.sh
 
       - name: Integration tests
         run: ./scripts/run-tests.sh ./kbox alpine.ext4

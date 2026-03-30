@@ -92,10 +92,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache apt packages
+        uses: actions/cache@v5
+        with:
+          path: ~/apt-cache
+          key: apt-lkl-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('.github/workflows/build-lkl.yml') }}
       - name: Install build dependencies
         run: |
+          mkdir -p ~/apt-cache
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison bc libelf-dev
+          sudo apt-get install -y -o Dir::Cache::Archives=$HOME/apt-cache \
+            build-essential flex bison bc libelf-dev
 
       - name: Build LKL from source
         env:

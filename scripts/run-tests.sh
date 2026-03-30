@@ -13,6 +13,7 @@ set -eu
 # Suppress via LSAN_OPTIONS suppression file (see scripts/lsan-suppressions.txt)
 # rather than blanket detect_leaks=0, so kbox's own leaks are still caught.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "${SCRIPT_DIR}/common.sh"
 SUPP="suppressions=${SCRIPT_DIR}/lsan-suppressions.txt"
 export LSAN_OPTIONS="${LSAN_OPTIONS:+${LSAN_OPTIONS}:}${SUPP}"
 
@@ -22,38 +23,13 @@ PASS=0
 FAIL=0
 SKIP=0
 
-# Colors (if terminal supports them).
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    NC='\033[0m'
-else
-    RED=''
-    GREEN=''
-    YELLOW=''
-    NC=''
-fi
-
-die()
-{
-    echo "error: $*" >&2
-    exit 1
-}
+set_colors
 
 [ -x "$KBOX" ] || die "kbox binary not found at ${KBOX}"
 [ -f "$ROOTFS" ] || die "rootfs image not found at ${ROOTFS}"
 
 KBOX_TEST_TIMEOUT="${KBOX_TEST_TIMEOUT:-30}"
-
-# Detect timeout command (GNU coreutils on Linux, gtimeout on macOS).
-if command -v timeout > /dev/null 2>&1; then
-    TIMEOUT_CMD="timeout"
-elif command -v gtimeout > /dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout"
-else
-    TIMEOUT_CMD=""
-fi
+find_timeout_cmd
 
 run_with_timeout()
 {

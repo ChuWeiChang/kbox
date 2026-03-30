@@ -15,6 +15,8 @@
 
 set -eu
 
+. "$(cd "$(dirname "$0")" && pwd)/common.sh"
+
 SIZE_MB="${1:-128}"
 OUTFILE="${ROOTFS:-alpine.ext4}"
 GUEST_DIR="tests/guest"
@@ -24,21 +26,12 @@ STAGING=""
 
 ALPINE_VERSION="3.21"
 if [ -z "${ALPINE_ARCH:-}" ]; then
-    case "$(uname -m)" in
-        aarch64 | arm64) ALPINE_ARCH="aarch64" ;;
-        x86_64 | amd64) ALPINE_ARCH="x86_64" ;;
-        *) die "Unsupported host architecture: $(uname -m). Set ALPINE_ARCH explicitly." ;;
-    esac
+    detect_arch
+    ALPINE_ARCH="$ARCH"
 fi
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}.0-${ALPINE_ARCH}.tar.gz"
 ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ALPINE_ARCH}/${ALPINE_TARBALL}"
 ALPINE_SHA256_FILE="scripts/alpine-sha256.txt"
-
-die()
-{
-    echo "error: $*" >&2
-    exit 1
-}
 
 cleanup()
 {
@@ -57,27 +50,10 @@ TARBALL_PATH="${CACHE_DIR}/${ALPINE_TARBALL}"
 
 if [ ! -f "$TARBALL_PATH" ]; then
     echo "Downloading Alpine minirootfs ${ALPINE_VERSION} (${ALPINE_ARCH})..."
-    if command -v curl > /dev/null 2>&1; then
-        curl -fSL -o "$TARBALL_PATH" "$ALPINE_URL" || die "Download failed."
-    elif command -v wget > /dev/null 2>&1; then
-        wget -q -O "$TARBALL_PATH" "$ALPINE_URL" || die "Download failed."
-    else
-        die "Neither curl nor wget found."
-    fi
+    download_file "$ALPINE_URL" "$TARBALL_PATH"
 fi
 
-# Verify SHA256.
-if [ -f "$ALPINE_SHA256_FILE" ]; then
-    EXPECTED=$(awk -v f="$ALPINE_TARBALL" '$2 == f { print $1 }' "$ALPINE_SHA256_FILE")
-    if [ -n "$EXPECTED" ]; then
-        ACTUAL=$(sha256sum "$TARBALL_PATH" | awk '{print $1}')
-        if [ "$ACTUAL" != "$EXPECTED" ]; then
-            rm -f "$TARBALL_PATH"
-            die "SHA256 mismatch: expected ${EXPECTED}, got ${ACTUAL}"
-        fi
-        echo "SHA256 verified."
-    fi
-fi
+verify_sha256 "$TARBALL_PATH" "$ALPINE_SHA256_FILE" "$ALPINE_TARBALL"
 
 # Create staging directory and extract Alpine rootfs.
 STAGING=$(mktemp -d)

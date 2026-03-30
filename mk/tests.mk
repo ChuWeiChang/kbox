@@ -76,9 +76,11 @@ check-unit: $(TEST_TARGET)
 
 # Unit tests are built WITHOUT linking LKL.
 # We define LKL stubs for functions referenced by test support code.
+TEST_LDFLAGS = $(filter-out -L$(LKL_DIR) -L$(LKL_DIR)/lib,$(LDFLAGS))
+
 $(TEST_TARGET): $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(wildcard .config)
 	@echo "  LD      $@"
-	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(LDFLAGS) -lpthread
+	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(TEST_LDFLAGS) -lpthread
 
 check-integration: $(TARGET) guest-bins stress-bins $(ROOTFS)
 	@echo "  RUN     check-integration"
