@@ -2,12 +2,13 @@
 
 /* Virtual FD table mapping guest FDs to LKL FDs.
  *
- * Two backing stores:
+ * Three backing stores:
  *   - entries[]:  FDs in [KBOX_FD_BASE, KBOX_FD_BASE + KBOX_FD_TABLE_MAX)
  *   - low_fds[]:  FDs in [0, KBOX_LOW_FD_MAX); populated only by dup2/dup3
+ *   - mid_fds[]:  real host FDs in [KBOX_LOW_FD_MAX, KBOX_FD_BASE)
  *
  * A slot is free when lkl_fd == -1.  All lookups go through fd_lookup() which
- * handles both ranges in O(1).
+ * handles all ranges in O(1).
  */
 
 #include <unistd.h>
@@ -23,6 +24,8 @@ static struct kbox_fd_entry *fd_lookup(const struct kbox_fd_table *t, long fd)
 {
     if (fd >= 0 && fd < KBOX_LOW_FD_MAX)
         return (struct kbox_fd_entry *) &t->low_fds[fd];
+    if (fd >= KBOX_LOW_FD_MAX && fd < KBOX_FD_BASE)
+        return (struct kbox_fd_entry *) &t->mid_fds[fd - KBOX_LOW_FD_MAX];
     if (fd >= KBOX_FD_BASE && fd < KBOX_FD_BASE + KBOX_FD_TABLE_MAX)
         return (struct kbox_fd_entry *) &t->entries[fd - KBOX_FD_BASE];
     return NULL;
@@ -47,6 +50,14 @@ void kbox_fd_table_init(struct kbox_fd_table *t)
         t->low_fds[i].shadow_writeback = 0;
         t->low_fds[i].mirror_tty = 0;
         t->low_fds[i].cloexec = 0;
+    }
+    for (i = 0; i < KBOX_MID_FD_MAX; i++) {
+        t->mid_fds[i].lkl_fd = -1;
+        t->mid_fds[i].host_fd = -1;
+        t->mid_fds[i].shadow_sp = -1;
+        t->mid_fds[i].shadow_writeback = 0;
+        t->mid_fds[i].mirror_tty = 0;
+        t->mid_fds[i].cloexec = 0;
     }
     t->next_fd = KBOX_FD_BASE;
     t->next_fast_fd = KBOX_FD_FAST_BASE;
@@ -267,6 +278,9 @@ static int lkl_fd_has_other_ref(const struct kbox_fd_table *t,
     for (i = 0; i < KBOX_LOW_FD_MAX; i++)
         if (&t->low_fds[i] != skip && t->low_fds[i].lkl_fd == lkl_fd)
             return 1;
+    for (i = 0; i < KBOX_MID_FD_MAX; i++)
+        if (&t->mid_fds[i] != skip && t->mid_fds[i].lkl_fd == lkl_fd)
+            return 1;
     return 0;
 }
 
@@ -275,10 +289,19 @@ static void close_cloexec_entry(struct kbox_fd_table *t,
                                 const struct kbox_sysnrs *s)
 {
     if (e->lkl_fd != -1 && e->cloexec) {
-        /* Only close the LKL socket if no other entry shares it (handles dup'd
-         * shadow sockets where multiple entries reference the same lkl_fd).
+        /* Host-passthrough entries are shared across supervised processes,
+         * but FD_CLOEXEC is per-process.  Clearing a passthrough slot here
+         * on one process's exec would drop tracking for siblings/parent that
+         * still hold the same FD number.  Leave the shared bookkeeping intact.
          */
-        if (!lkl_fd_has_other_ref(t, e, e->lkl_fd))
+        if (e->lkl_fd == KBOX_LKL_FD_SHADOW_ONLY)
+            return;
+
+        /* Only close real LKL FDs; sentinel values (e.g.
+         * KBOX_LKL_FD_SHADOW_ONLY for host-passthrough pipes/eventfds) are not
+         * LKL file descriptors.
+         */
+        if (e->lkl_fd >= 0 && !lkl_fd_has_other_ref(t, e, e->lkl_fd))
             kbox_lkl_close(s, e->lkl_fd);
 
         /* Shadow sockets: host_fd is tracee-namespace, don't close. */
@@ -301,6 +324,8 @@ void kbox_fd_table_close_cloexec(struct kbox_fd_table *t,
 
     for (i = 0; i < KBOX_LOW_FD_MAX; i++)
         close_cloexec_entry(t, &t->low_fds[i], s);
+    for (i = 0; i < KBOX_MID_FD_MAX; i++)
+        close_cloexec_entry(t, &t->mid_fds[i], s);
     for (i = 0; i < KBOX_FD_TABLE_MAX; i++)
         close_cloexec_entry(t, &t->entries[i], s);
 }
@@ -334,6 +359,10 @@ long kbox_fd_table_find_by_host_fd(const struct kbox_fd_table *t, long host_fd)
         if (t->low_fds[i].lkl_fd != -1 && t->low_fds[i].host_fd == host_fd)
             return i;
     }
+    for (i = 0; i < KBOX_MID_FD_MAX; i++) {
+        if (t->mid_fds[i].lkl_fd != -1 && t->mid_fds[i].host_fd == host_fd)
+            return i + KBOX_LOW_FD_MAX;
+    }
 
     /* Scan the main entries. */
     for (i = 0; i < KBOX_FD_TABLE_MAX; i++) {
@@ -350,6 +379,10 @@ unsigned kbox_fd_table_count(const struct kbox_fd_table *t)
 
     for (i = 0; i < KBOX_LOW_FD_MAX; i++) {
         if (t->low_fds[i].lkl_fd != -1)
+            n++;
+    }
+    for (i = 0; i < KBOX_MID_FD_MAX; i++) {
+        if (t->mid_fds[i].lkl_fd != -1)
             n++;
     }
     for (i = 0; i < KBOX_FD_TABLE_MAX; i++) {

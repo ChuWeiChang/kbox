@@ -20,7 +20,17 @@ struct kbox_sysnrs; /* forward declaration */
 #define KBOX_FD_HOSTONLY_BASE (KBOX_FD_BASE + ((KBOX_FD_TABLE_MAX * 3) / 4))
 /* redirect slots for FDs 0..1023 (dup2 targets) */
 #define KBOX_LOW_FD_MAX 1024
-#define KBOX_FD_TABLE_CAPACITY (KBOX_FD_TABLE_MAX + KBOX_LOW_FD_MAX)
+/* tracked host-passthrough FDs in the gap [1024, 32768) */
+#define KBOX_MID_FD_MAX (KBOX_FD_BASE - KBOX_LOW_FD_MAX)
+#define KBOX_FD_TABLE_CAPACITY \
+    (KBOX_FD_TABLE_MAX + KBOX_LOW_FD_MAX + KBOX_MID_FD_MAX)
+
+/* Sentinel lkl_fd value for host-passthrough FDs (pipes, eventfds, timerfds,
+ * epoll FDs, stdio) that have no LKL backing.  Stored in kbox_fd_entry.lkl_fd
+ * to mark the slot as occupied.  I/O handlers CONTINUE these to the host
+ * kernel; untracked FDs (lkl_fd == -1) get EBADF instead.
+ */
+#define KBOX_LKL_FD_SHADOW_ONLY (-2)
 
 struct kbox_fd_entry {
     long lkl_fd;   /* LKL-internal FD, -1 if slot is free */
@@ -37,8 +47,10 @@ struct kbox_fd_entry {
 struct kbox_fd_table {
     struct kbox_fd_entry entries[KBOX_FD_TABLE_MAX];
     struct kbox_fd_entry low_fds[KBOX_LOW_FD_MAX]; /* dup2 redirect slots */
-    long next_fd;          /* Next virtual FD to allocate */
-    long next_fast_fd;     /* Next host-shadow fast FD to allocate */
+    struct kbox_fd_entry
+        mid_fds[KBOX_MID_FD_MAX]; /* real host FDs 1024..32767 */
+    long next_fd;                 /* Next virtual FD to allocate */
+    long next_fast_fd;            /* Next host-shadow fast FD to allocate */
     long next_hostonly_fd; /* Next host-only cached-shadow FD to allocate */
 };
 

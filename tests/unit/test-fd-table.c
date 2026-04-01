@@ -13,6 +13,8 @@ static void test_fd_table_init_zeros(void)
         ASSERT_EQ(t.entries[i].lkl_fd, -1);
     for (int i = 0; i < KBOX_LOW_FD_MAX; i++)
         ASSERT_EQ(t.low_fds[i].lkl_fd, -1);
+    for (int i = 0; i < KBOX_MID_FD_MAX; i++)
+        ASSERT_EQ(t.mid_fds[i].lkl_fd, -1);
 }
 
 static void test_fd_table_insert_basic(void)
@@ -94,7 +96,7 @@ static void test_fd_table_out_of_range(void)
 {
     struct kbox_fd_table t;
     kbox_fd_table_init(&t);
-    /* Gap between low_fds and high range */
+    /* Mid-range host FDs are now directly trackable. */
     ASSERT_EQ(kbox_fd_table_get_lkl(&t, KBOX_LOW_FD_MAX), -1);
     ASSERT_EQ(kbox_fd_table_get_lkl(&t, KBOX_FD_BASE - 1), -1);
     /* Above range */
@@ -122,9 +124,10 @@ static void test_fd_table_insert_at_low_range(void)
     ASSERT_EQ(kbox_fd_table_get_lkl(&t, KBOX_LOW_FD_MAX - 1), 77);
     ASSERT_TRUE(kbox_fd_table_mirror_tty(&t, KBOX_LOW_FD_MAX - 1));
 
-    /* Gap: FD 1024 should fail */
+    /* Mid-range host FD: FD 1024 */
     rc = kbox_fd_table_insert_at(&t, KBOX_LOW_FD_MAX, 66, 0);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(kbox_fd_table_get_lkl(&t, KBOX_LOW_FD_MAX), 66);
 
     /* Low-range remove */
     long old = kbox_fd_table_remove(&t, 100);

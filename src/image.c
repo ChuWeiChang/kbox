@@ -578,6 +578,8 @@ static void init_launch_ctx(struct kbox_supervisor_ctx *ctx,
                             struct kbox_web_ctx *web_ctx)
 {
     kbox_fd_table_init(fd_table);
+    for (int i = 0; i < 3; i++)
+        kbox_fd_table_insert_at(fd_table, i, KBOX_LKL_FD_SHADOW_ONLY, 0);
     memset(ctx, 0, sizeof(*ctx));
 #if KBOX_STAT_CACHE_ENABLED
     for (int ci = 0; ci < KBOX_STAT_CACHE_MAX; ci++)
