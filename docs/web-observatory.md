@@ -29,13 +29,13 @@ process.
 make KBOX_HAS_WEB=1 BUILD=release
 
 # Launch with observatory on default port 8080
-./kbox image -S alpine.ext4 --web -- /bin/sh -i
+./kbox -S alpine.ext4 --web -- /bin/sh -i
 
 # Custom port and bind address (e.g., access from outside a VM)
-./kbox image -S alpine.ext4 --web=9090 --web-bind 0.0.0.0 -- /bin/sh -i
+./kbox -S alpine.ext4 --web=9090 --web-bind 0.0.0.0 -- /bin/sh -i
 
 # JSON trace to stderr without HTTP server
-./kbox image -S alpine.ext4 --trace-format json -- /bin/ls /
+./kbox -S alpine.ext4 --trace-format json -- /bin/ls /
 ```
 
 Open `http://127.0.0.1:8080/` in a browser. The dashboard shows:

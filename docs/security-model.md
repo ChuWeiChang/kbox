@@ -28,7 +28,7 @@ Three deployment tiers, in ascending isolation strength:
 
 | Tier | Threat model | Setup |
 |------|-------------|-------|
-| kbox alone | Trusted/semi-trusted code: build tools, test suites, static analysis, research, teaching | `./kbox image -S rootfs.ext4 -- /bin/sh -i` |
+| kbox alone | Trusted/semi-trusted code: build tools, test suites, static analysis, research, teaching | `./kbox -S rootfs.ext4 -- /bin/sh -i` |
 | kbox + namespace/LSM | Agent tool execution with defense-in-depth: CI runners, automated code review | Wrap with `bwrap`, Landlock, or cgroup limits (adds containment and resource controls, not hardware isolation) |
 | outer sandbox + kbox | Untrusted code, multi-tenant: hostile payloads, student submissions, public-facing agent APIs | Run kbox inside a microVM (Firecracker, Cloud Hypervisor) for hardware-enforced isolation, or inside gVisor for userspace-kernel isolation |
 

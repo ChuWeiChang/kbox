@@ -180,16 +180,16 @@ Run a guest binary:
 
 ```bash
 # Interactive shell with recommended mounts + root identity
-./kbox image -S alpine.ext4 -- /bin/sh -i
+./kbox -S alpine.ext4 -- /bin/sh -i
 
 # Run a specific command
-./kbox image -S alpine.ext4 -- /bin/ls -la /
+./kbox -S alpine.ext4 -- /bin/ls -la /
 
 # Raw mount only (no /proc, /sys, /dev), for targeted commands
-./kbox image -r alpine.ext4 -- /bin/cat /etc/os-release
+./kbox -r alpine.ext4 -- /bin/cat /etc/os-release
 
 # Custom kernel cmdline, bind mount, explicit identity
-./kbox image -r alpine.ext4 -k "mem=2048M loglevel=7" \
+./kbox -r alpine.ext4 -k "mem=2048M loglevel=7" \
     -b /home/user/data:/mnt/data --change-id 1000:1000 -- /bin/sh -i
 ```
 
@@ -202,19 +202,19 @@ interactive mode regardless of terminal detection.
 
 ```bash
 # Auto (default): rewrite/trap for direct binaries, seccomp for shells
-./kbox image -S alpine.ext4 -- /bin/ls /
+./kbox -S alpine.ext4 -- /bin/ls /
 
 # Force seccomp (most compatible, handles fork+exec)
-./kbox image -S alpine.ext4 --syscall-mode=seccomp -- /bin/sh -i
+./kbox -S alpine.ext4 --syscall-mode=seccomp -- /bin/sh -i
 
 # Force trap (single-exec commands, SIGSYS dispatch)
-./kbox image -r alpine.ext4 --syscall-mode=trap -- /bin/cat /etc/hostname
+./kbox -r alpine.ext4 --syscall-mode=trap -- /bin/cat /etc/hostname
 
 # Force rewrite (patched syscall sites, fastest stat path)
-./kbox image -r alpine.ext4 --syscall-mode=rewrite -- /opt/tests/bench-test 200
+./kbox -r alpine.ext4 --syscall-mode=rewrite -- /opt/tests/bench-test 200
 ```
 
-Run `./kbox image --help` for the full option list.
+Run `./kbox --help` for the full option list.
 
 ## Documentation
 
