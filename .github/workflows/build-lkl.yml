@@ -36,8 +36,12 @@ jobs:
       contents: read
     outputs:
       lkl_commit: ${{ steps.head.outputs.commit }}
+      yml_hash: ${{ steps.compare.outputs.yml_hash }}
       needs_build: ${{ steps.compare.outputs.needs_build }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
       - name: Get upstream LKL HEAD
         id: head
         run: |
@@ -54,6 +58,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          CURRENT_YML=$(sha256sum .github/workflows/build-lkl.yml | awk '{print $1}')
+          echo "yml_hash=${CURRENT_YML}" >> "$GITHUB_OUTPUT"
+
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "needs_build=true" >> "$GITHUB_OUTPUT"
             echo "Forced rebuild requested."
@@ -61,18 +68,27 @@ jobs:
           fi
 
           # Fetch BUILD_INFO from existing nightly release.
-          LAST_COMMIT=$(gh release view "${{ env.NIGHTLY_TAG }}" \
+          LAST_RELEASE=$(gh release view "${{ env.NIGHTLY_TAG }}" \
             --repo "${{ env.KBOX_REPO }}" \
-            --json body --jq '.body' 2>/dev/null \
+            --json body --jq '.body' 2>/dev/null) || LAST_RELEASE=""
+
+          LAST_COMMIT=$(echo "$LAST_RELEASE" \
             | grep -oP 'commit=\K[0-9a-f]+' | head -1) || LAST_COMMIT=""
 
-          CURRENT="${{ steps.head.outputs.commit }}"
-          if [ "$LAST_COMMIT" = "$CURRENT" ]; then
-            echo "needs_build=false" >> "$GITHUB_OUTPUT"
-            echo "Upstream unchanged (${CURRENT}). Skipping build."
-          else
+          LAST_YML=$(echo "$LAST_RELEASE" \
+            | grep -oP 'yml_hash=\K[0-9a-f]+' | head -1) || LAST_YML=""
+
+          CURRENT_COMMIT="${{ steps.head.outputs.commit }}"
+
+          if [ "$LAST_COMMIT" != "$CURRENT_COMMIT" ]; then
             echo "needs_build=true" >> "$GITHUB_OUTPUT"
-            echo "New upstream commit: ${CURRENT} (was: ${LAST_COMMIT:-none})"
+            echo "New upstream commit: ${CURRENT_COMMIT} (was: ${LAST_COMMIT:-none})"
+          elif [ "$LAST_YML" != "$CURRENT_YML" ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            echo "build-lkl.yml was changed"
+          else
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged (${CURRENT_COMMIT}) and the build script unchanged. Skipping build."
           fi
 
   # ---- Build x86_64, aarch64 and riscv64 in parallel ----
@@ -144,12 +160,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           LKL_COMMIT="${{ needs.check-upstream.outputs.lkl_commit }}"
+          YML_HASH="${{ needs.check-upstream.outputs.yml_hash }}"
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
           cat > /tmp/release-notes.md <<EOF
           Nightly prebuilt liblkl.a for kbox.
 
           commit=${LKL_COMMIT}
+          yml_hash=${YML_HASH}
           date=${BUILD_DATE}
           upstream=https://github.com/${{ env.LKL_UPSTREAM }}/commit/${LKL_COMMIT}
 
