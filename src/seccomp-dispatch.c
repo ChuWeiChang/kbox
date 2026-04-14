@@ -2809,17 +2809,7 @@ static void cleanup_replaced_fd_tracking(struct kbox_supervisor_ctx *ctx,
         long shadow_lkl = kbox_fd_table_get_lkl(ctx->fd_table, shadow_vfd);
         remove_fd_table_entry_with_writeback(ctx, shadow_vfd);
         if (shadow_lkl >= 0) {
-            int ref = 0;
-            for (long j = 0; j < KBOX_FD_TABLE_MAX && !ref; j++)
-                if (ctx->fd_table->entries[j].lkl_fd == shadow_lkl)
-                    ref = 1;
-            for (long j = 0; j < KBOX_MID_FD_MAX && !ref; j++)
-                if (ctx->fd_table->mid_fds[j].lkl_fd == shadow_lkl)
-                    ref = 1;
-            for (long j = 0; j < KBOX_LOW_FD_MAX && !ref; j++)
-                if (ctx->fd_table->low_fds[j].lkl_fd == shadow_lkl)
-                    ref = 1;
-            if (!ref) {
+            if (!kbox_fd_table_lkl_ref_count(ctx->fd_table, shadow_lkl)) {
                 kbox_net_deregister_socket((int) shadow_lkl);
                 lkl_close_and_invalidate(ctx, shadow_lkl);
             }
@@ -2965,19 +2955,8 @@ static struct kbox_dispatch forward_dup2(const struct kbox_syscall_request *req,
                             long sl = kbox_fd_table_get_lkl(ctx->fd_table, sv);
                             remove_fd_table_entry_with_writeback(ctx, sv);
                             if (sl >= 0) {
-                                int ref = 0;
-                                for (long j = 0; j < KBOX_FD_TABLE_MAX; j++)
-                                    if (ctx->fd_table->entries[j].lkl_fd == sl)
-                                        ref = 1;
-                                for (long j = 0; j < KBOX_MID_FD_MAX && !ref;
-                                     j++)
-                                    if (ctx->fd_table->mid_fds[j].lkl_fd == sl)
-                                        ref = 1;
-                                for (long j = 0; j < KBOX_LOW_FD_MAX && !ref;
-                                     j++)
-                                    if (ctx->fd_table->low_fds[j].lkl_fd == sl)
-                                        ref = 1;
-                                if (!ref) {
+                                if (!kbox_fd_table_lkl_ref_count(ctx->fd_table,
+                                                                 sl)) {
                                     kbox_net_deregister_socket((int) sl);
                                     lkl_close_and_invalidate(ctx, sl);
                                 }
@@ -3090,19 +3069,8 @@ static struct kbox_dispatch forward_dup3(const struct kbox_syscall_request *req,
                                 kbox_fd_table_get_lkl(ctx->fd_table, sv3);
                             remove_fd_table_entry_with_writeback(ctx, sv3);
                             if (sl3 >= 0) {
-                                int r3 = 0;
-                                for (long j = 0; j < KBOX_FD_TABLE_MAX; j++)
-                                    if (ctx->fd_table->entries[j].lkl_fd == sl3)
-                                        r3 = 1;
-                                for (long j = 0; j < KBOX_MID_FD_MAX && !r3;
-                                     j++)
-                                    if (ctx->fd_table->mid_fds[j].lkl_fd == sl3)
-                                        r3 = 1;
-                                for (long j = 0; j < KBOX_LOW_FD_MAX && !r3;
-                                     j++)
-                                    if (ctx->fd_table->low_fds[j].lkl_fd == sl3)
-                                        r3 = 1;
-                                if (!r3) {
+                                if (!kbox_fd_table_lkl_ref_count(ctx->fd_table,
+                                                                 sl3)) {
                                     kbox_net_deregister_socket((int) sl3);
                                     lkl_close_and_invalidate(ctx, sl3);
                                 }
