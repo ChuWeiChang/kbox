@@ -2922,6 +2922,8 @@ static struct kbox_dispatch forward_dup2(const struct kbox_syscall_request *req,
 {
     long oldfd = to_c_long_arg(kbox_syscall_request_arg(req, 0));
     long newfd = to_c_long_arg(kbox_syscall_request_arg(req, 1));
+    if (oldfd == newfd)
+        return kbox_dispatch_value((int64_t) newfd);
 
     long lkl_old = kbox_fd_table_get_lkl(ctx->fd_table, oldfd);
 
@@ -2930,8 +2932,6 @@ static struct kbox_dispatch forward_dup2(const struct kbox_syscall_request *req,
          * a supervisor copy sharing the same file description, then inject
          * at the target FD via ADDFD_AT.
          */
-        if (oldfd == newfd)
-            return kbox_dispatch_value((int64_t) newfd);
         int copy = dup_tracee_fd(kbox_syscall_request_pid(req), (int) oldfd);
         if (copy < 0)
             return kbox_dispatch_errno(-copy);
@@ -2945,10 +2945,6 @@ static struct kbox_dispatch forward_dup2(const struct kbox_syscall_request *req,
     }
 
     if (lkl_old < 0) {
-        /* Shadow socket dup2: dup2(fd, fd) must return fd unchanged. */
-        if (oldfd == newfd)
-            return kbox_dispatch_value((int64_t) newfd);
-
         long orig_vfd = kbox_fd_table_find_by_host_fd(ctx->fd_table, oldfd);
         if (orig_vfd >= 0) {
             struct kbox_fd_entry *orig =
@@ -3012,9 +3008,6 @@ static struct kbox_dispatch forward_dup2(const struct kbox_syscall_request *req,
         }
         return kbox_dispatch_errno(EBADF);
     }
-
-    if (oldfd == newfd)
-        return kbox_dispatch_value((int64_t) newfd);
 
     /* Dup first, then close the old mapping.  This preserves the old newfd
      * if the dup fails (e.g. EMFILE), matching dup2 atomicity semantics.
