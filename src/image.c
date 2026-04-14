@@ -1318,16 +1318,6 @@ int kbox_run_image(const struct kbox_image_args *args)
              * all children share one LKL instance.
              */
             {
-#if !defined(__x86_64__) && !defined(__aarch64__)
-                if (args->syscall_mode == KBOX_SYSCALL_MODE_TRAP) {
-                    fprintf(stderr,
-                            "kbox: unsupported architecture for trap mode\n");
-                    close(exec_memfd);
-                    if (interp_memfd >= 0)
-                        close(interp_memfd);
-                    goto err_net;
-                }
-#endif
                 int use_trap = (args->syscall_mode == KBOX_SYSCALL_MODE_TRAP);
                 if (args->syscall_mode == KBOX_SYSCALL_MODE_AUTO) {
                     if (!is_shell_command(command)) {
