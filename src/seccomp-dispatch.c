@@ -1234,7 +1234,7 @@ int ensure_same_fd_shadow(struct kbox_supervisor_ctx *ctx,
      * notifications. The local-shadow handlers already cover read/lseek/fstat
      * safely, so prefer them over same-fd injection here.
      */
-    entry->host_fd = KBOX_FD_LOCAL_ONLY_SHADOW;
+    kbox_fd_table_set_host_fd(ctx->fd_table, fd, KBOX_FD_LOCAL_ONLY_SHADOW);
     entry->shadow_sp = memfd;
     entry->shadow_writeback = 0;
 
