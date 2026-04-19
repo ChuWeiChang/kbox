@@ -247,9 +247,97 @@ static void test_fd_table_fuzz_consistency(void)
         ASSERT_EQ(kbox_fd_table_find_by_host_fd(&t, i), KBOX_HOST_VFD_NONE);
     }
 }
+#ifdef KBOX_PERF_TESTS
+#include <stdio.h>
+#include <time.h>
+#define PERF_ITERATIONS 1000000
+static double time_diff_ns(struct timespec *start, struct timespec *end)
+{
+    return ((double) (end->tv_sec - start->tv_sec) * 1e9) +
+           (double) (end->tv_nsec - start->tv_nsec);
+}
+static void test_fd_table_o1_characteristics(void)
+{
+    struct kbox_fd_table t;
+    int ns_to_test[] = {64, 256, 1024, 4096, 16384};
+    int num_sizes = sizeof(ns_to_test) / sizeof(ns_to_test[0]);
+
+    double baseline_present_ns = 0;
+    double baseline_absent_ns = 0;
+
+    printf("\n--- O(1) Characteristic Perf Test ---\n");
+
+    for (int i = 0; i < num_sizes; i++) {
+        int n = ns_to_test[i];
+        kbox_fd_table_init(&t);
+
+        /* Populate the table with N entries */
+        for (int j = 0; j < n; j++) {
+            long vfd = kbox_fd_table_insert(&t, j, 0);
+            /* Sparse host FDs to prevent perfect linear caching */
+            long host_fd = 100 + (j * 2);
+            kbox_fd_table_set_host_fd(&t, vfd, host_fd);
+        }
+
+        long target_present = 100 + ((n / 2) * 2); /* Middle of the pack */
+        long target_absent = 65535;
+
+        struct timespec start, end;
+        double present_time_ns, absent_time_ns;
+
+        /* Accumulators to prevent GCC -O2 from deleting the loop via dead-code
+         * elimination */
+        long sum_present = 0;
+        long sum_absent = 0;
+
+        /* Time Known-Present Lookups */
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (int k = 0; k < PERF_ITERATIONS; k++) {
+            sum_present += kbox_fd_table_find_by_host_fd(&t, target_present);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        present_time_ns = time_diff_ns(&start, &end) / PERF_ITERATIONS;
+
+        /* Time Known-Absent Lookups */
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (int k = 0; k < PERF_ITERATIONS; k++) {
+            sum_absent += kbox_fd_table_find_by_host_fd(&t, target_absent);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        absent_time_ns = time_diff_ns(&start, &end) / PERF_ITERATIONS;
+
+        printf("N = %-5d | Present: %6.2f ns/op | Absent: %6.2f ns/op\n", n,
+               present_time_ns, absent_time_ns);
+
+        /* Assert accumulators so the compiler keeps the logic */
+        ASSERT_TRUE(sum_present > 0);
+
+        /* Assert O(1) scaling relative to the baseline N=64 */
+        if (i == 0) {
+            baseline_present_ns = present_time_ns;
+            baseline_absent_ns = absent_time_ns;
+        } else {
+            /* If this was O(n), N=16384 would be ~256x slower than N=64.
+             * We set the threshold to ~2.5x. It won't be perfectly 1.0x because
+             * larger arrays cause L1/L2 CPU cache misses, but it proves O(1)
+             * complexity.
+             */
+            double present_ratio = present_time_ns / baseline_present_ns;
+            double absent_ratio = absent_time_ns / baseline_absent_ns;
+
+            ASSERT_TRUE(present_ratio < 2.5);
+            ASSERT_TRUE(absent_ratio < 2.5);
+        }
+    }
+    printf("-------------------------------------\n\n");
+}
+#endif
 void test_fd_table_refcount_init(void)
 {
     TEST_REGISTER(test_fd_table_refcount_lifecycle);
     TEST_REGISTER(test_fd_table_multi_downgrade_regression);
     TEST_REGISTER(test_fd_table_fuzz_consistency);
+#ifdef KBOX_PERF_TESTS
+    TEST_REGISTER(test_fd_table_o1_characteristics);
+#endif
 }

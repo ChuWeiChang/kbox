@@ -82,6 +82,11 @@ check-unit: $(TEST_TARGET)
 # We define LKL stubs for functions referenced by test support code.
 TEST_LDFLAGS = $(filter-out -L$(LKL_DIR) -L$(LKL_DIR)/lib,$(LDFLAGS))
 
+ifdef KBOX_PERF_TESTS
+CFLAGS += -O2 -DKBOX_PERF_TESTS
+CFLAGS := $(filter-out -O0 -g -fsanitize=address,$(CFLAGS))
+endif
+
 $(TEST_TARGET): $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(wildcard .config)
 	@echo "  LD      $@"
 	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(TEST_LDFLAGS) -lpthread
