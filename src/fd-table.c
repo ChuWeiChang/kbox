@@ -132,10 +132,9 @@ static inline void rev_host_clear(struct kbox_fd_table *t,
     if (t->host_fd_refs[host_fd] == 0) {
         t->host_to_vfd[host_fd] = KBOX_HOST_VFD_NONE;
     } else if (t->host_fd_refs[host_fd] == 1) {
-        /* 1. Try a normal search first */
         long cur_vfd = kbox_fd_table_find_by_host_fd(t, host_fd);
 
-        /* 2. If the search tripped over the dying slot, hide it and search
+        /* If the search tripped over the dying slot, hide it and search
          * again */
         if (cur_vfd == vfd) {
             struct kbox_fd_entry *e = fd_lookup(t, vfd);
