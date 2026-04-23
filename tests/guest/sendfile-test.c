@@ -73,87 +73,87 @@ int main(void)
     out_fd = open(OUT_FILE, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0644);
     CHECK(out_fd >= 0, "create regular output file for sendfile target");
 
-    // #ifdef KBOX_PERF_TESTS
-    //     /* O(1) Characteristic Test: Open multiple shadow FDs at different
-    //      * population densities to verify lookup performance is constant.
-    //      */
-    //     struct timespec t_start, t_end;
-    //     FILE *tty = fopen("/dev/tty", "w");
-    //     if (tty) {
-    //         fprintf(tty,
-    //                 "\n--- O(1) Characteristic Perf Test (find_by_host_fd) "
-    //                 "---\n");
-    //     }
+#ifdef KBOX_PERF_TESTS
+//     /* O(1) Characteristic Test: Open multiple shadow FDs at different
+//      * population densities to verify lookup performance is constant.
+//      */
+//     struct timespec t_start, t_end;
+//     FILE *tty = fopen("/dev/tty", "w");
+//     if (tty) {
+//         fprintf(tty,
+//                 "\n--- O(1) Characteristic Perf Test (find_by_host_fd) "
+//                 "---\n");
+//     }
 
-    //     double baseline_time_ns = 0;
+//     double baseline_time_ns = 0;
 
-    //     /* Create a temporary target for performance writes */
-    //     int dummy_out_fd = open("/opt/perf_target.tmp",
-    //                             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-    //                             0644);
-    //     CHECK(dummy_out_fd >= 0, "open dummy target for perf test");
+//     /* Create a temporary target for performance writes */
+//     int dummy_out_fd = open("/opt/perf_target.tmp",
+//                             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+//                             0644);
+//     CHECK(dummy_out_fd >= 0, "open dummy target for perf test");
 
-    //     for (int size_idx = 0; size_idx < num_sizes; size_idx++) {
-    //         int num_fds = perf_test_sizes[size_idx];
+//     for (int size_idx = 0; size_idx < num_sizes; size_idx++) {
+//         int num_fds = perf_test_sizes[size_idx];
 
-    //         /* Create dummy shadow FDs to populate the table */
-    //         int *fds_to_close = malloc((num_fds - 1) * sizeof(int));
-    //         CHECK(fds_to_close != NULL, "allocate fd array");
-    //         memset(fds_to_close, 0, (num_fds - 1) * sizeof(int));
+//         /* Create dummy shadow FDs to populate the table */
+//         int *fds_to_close = malloc((num_fds - 1) * sizeof(int));
+//         CHECK(fds_to_close != NULL, "allocate fd array");
+//         memset(fds_to_close, 0, (num_fds - 1) * sizeof(int));
 
-    //         for (int i = 0; i < num_fds - 1; i++) {
-    //             int fd = open(TEST_FILE, O_RDONLY | O_CLOEXEC);
-    //             if (fd >= 0) {
-    //                 fds_to_close[i] = fd;
-    //             }
-    //         }
+//         for (int i = 0; i < num_fds - 1; i++) {
+//             int fd = open(TEST_FILE, O_RDONLY | O_CLOEXEC);
+//             if (fd >= 0) {
+//                 fds_to_close[i] = fd;
+//             }
+//         }
 
-    //         /* Time sendfile() from the main shadow FD with varying table
-    //         sizes */ clock_gettime(CLOCK_MONOTONIC, &t_start); for (int iter
-    //         = 0; iter < PERF_ITERATIONS; iter++) {
-    //             lseek(in_fd, 0, SEEK_SET);
-    //             sendfile(dummy_out_fd, in_fd, NULL, test_len);
-    //         }
-    //         clock_gettime(CLOCK_MONOTONIC, &t_end);
+//         /* Time sendfile() from the main shadow FD with varying table
+//         sizes */ clock_gettime(CLOCK_MONOTONIC, &t_start); for (int iter
+//         = 0; iter < PERF_ITERATIONS; iter++) {
+//             lseek(in_fd, 0, SEEK_SET);
+//             sendfile(dummy_out_fd, in_fd, NULL, test_len);
+//         }
+//         clock_gettime(CLOCK_MONOTONIC, &t_end);
 
-    //         double total_ns = time_diff_ns(&t_start, &t_end);
-    //         double ns_per_op = total_ns / PERF_ITERATIONS;
+//         double total_ns = time_diff_ns(&t_start, &t_end);
+//         double ns_per_op = total_ns / PERF_ITERATIONS;
 
-    //         if (tty) {
-    //             fprintf(tty, "N = %-5d (fd table entries) | Time: %8.2f
-    //             ns/op\n",
-    //                     num_fds, ns_per_op);
-    //         }
+//         if (tty) {
+//             fprintf(tty, "N = %-5d (fd table entries) | Time: %8.2f
+//             ns/op\n",
+//                     num_fds, ns_per_op);
+//         }
 
-    //         if (size_idx == 0) {
-    //             baseline_time_ns = ns_per_op;
-    //         } else {
-    //             double ratio = ns_per_op / baseline_time_ns;
-    //             if (tty) {
-    //                 fprintf(tty, "  Ratio vs baseline: %.2fx\n", ratio);
-    //             }
-    //             CHECK(ratio < 2.0,
-    //                   "O(1) violation: lookup degraded beyond 2x ratio");
-    //         }
+//         if (size_idx == 0) {
+//             baseline_time_ns = ns_per_op;
+//         } else {
+//             double ratio = ns_per_op / baseline_time_ns;
+//             if (tty) {
+//                 fprintf(tty, "  Ratio vs baseline: %.2fx\n", ratio);
+//             }
+//             CHECK(ratio < 2.0,
+//                   "O(1) violation: lookup degraded beyond 2x ratio");
+//         }
 
-    //         /* Cleanup dummy FDs */
-    //         for (int i = 0; i < num_fds - 1; i++) {
-    //             if (fds_to_close[i] > 0)
-    //                 close(fds_to_close[i]);
-    //         }
-    //         free(fds_to_close);
-    //     }
+//         /* Cleanup dummy FDs */
+//         for (int i = 0; i < num_fds - 1; i++) {
+//             if (fds_to_close[i] > 0)
+//                 close(fds_to_close[i]);
+//         }
+//         free(fds_to_close);
+//     }
 
-    //     close(dummy_out_fd);
-    //     unlink("/opt/perf_target.tmp");
+//     close(dummy_out_fd);
+//     unlink("/opt/perf_target.tmp");
 
-    //     if (tty) {
-    //         fprintf(tty,
-    //                 "✓ O(1) verified: lookup time stays constant across table
-    //                 " "sizes\n\n");
-    //         fclose(tty);
-    //     }
-    // #endif
+//     if (tty) {
+//         fprintf(tty,
+//                 "✓ O(1) verified: lookup time stays constant across table
+//                 " "sizes\n\n");
+//         fclose(tty);
+//     }
+#endif
 
     /* 4. Correctness pass: use sendfile to verify data integrity */
     lseek(in_fd, 0, SEEK_SET);
