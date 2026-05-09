@@ -119,6 +119,6 @@ void test_fd_table_refcount_init(void)
 {
     TEST_REGISTER(test_fd_table_multi_downgrade_regression);
 #ifdef KBOX_PERF_TESTS
-    TEST_REGISTER(test_fd_table_o1_characteristics);
+    PERF_REGISTER(test_fd_table_o1_characteristics);
 #endif
 }

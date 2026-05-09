@@ -77,6 +77,14 @@ void test_pass(void);
     } while (0)
 #endif
 
+#ifdef KBOX_PERF_ONLY
+#define TEST_REGISTER(fn) ((void) 0)
+#else
 #define TEST_REGISTER(fn) test_register(#fn, fn)
+#endif
+
+/* Tag a test as a perf benchmark; always registers regardless of KBOX_PERF_ONLY
+ */
+#define PERF_REGISTER(fn) test_register(#fn, fn)
 
 #endif /* TEST_RUNNER_H */

@@ -72,24 +72,34 @@ ROOTFS       = alpine.ext4
 
 # ---- Test targets ----
 
-check: check-unit check-integration check-stress
+check: check-unit check-perf check-integration check-stress
 
 check-unit: $(TEST_TARGET)
 	@echo "  RUN     check-unit"
+	$(Q)./$(TEST_TARGET)
+
+check-perf:
+	@echo "  LD      $(TEST_TARGET)"
+	$(Q)$(CC) $(PERF_TEST_CFLAGS) -DKBOX_UNIT_TEST -o $(TEST_TARGET) $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(PERF_TEST_LDFLAGS) -lpthread
+	@echo "  RUN     check-perf"
 	$(Q)./$(TEST_TARGET)
 
 # Unit tests are built WITHOUT linking LKL.
 # We define LKL stubs for functions referenced by test support code.
 TEST_LDFLAGS = $(filter-out -L$(LKL_DIR) -L$(LKL_DIR)/lib,$(LDFLAGS))
 
-ifdef KBOX_PERF_TESTS
-CFLAGS += -O2 -DKBOX_PERF_TESTS
-CFLAGS := $(filter-out -O0 -g -fsanitize=address,$(CFLAGS))
-endif
+# Perf-test binary: built from scratch — no sanitizers, optimised, perf-only.
+# Derived independently of CFLAGS so that CFLAGS is never mutated.
+PERF_TEST_CFLAGS  := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Wshadow \
+                     -Wno-unused-parameter -Wno-unused-function \
+                     -Iinclude -Isrc \
+                     -O2 -DKBOX_UNIT_TEST -DKBOX_PERF_TESTS -DKBOX_PERF_ONLY
+PERF_TEST_LDFLAGS := $(filter-out -L$(LKL_DIR) -L$(LKL_DIR)/lib -fsanitize%,$(LDFLAGS))
 
 $(TEST_TARGET): $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(wildcard .config)
 	@echo "  LD      $@"
 	$(Q)$(CC) $(CFLAGS) -DKBOX_UNIT_TEST -o $@ $(TEST_SRCS) $(TEST_SUPPORT_SRCS) $(TEST_LDFLAGS) -lpthread
+
 
 check-integration: $(TARGET) guest-bins stress-bins $(ROOTFS)
 	@echo "  RUN     check-integration"
@@ -169,4 +179,4 @@ check-commitlog:
 	@echo "  RUN     check-commitlog"
 	$(Q)scripts/check-commitlog.sh
 
-.PHONY: check check-unit check-integration check-stress check-commitlog guest-bins stress-bins rootfs check-syntax
+.PHONY: check check-unit check-perf check-integration check-stress check-commitlog guest-bins stress-bins rootfs check-syntax
