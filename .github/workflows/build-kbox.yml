@@ -9,13 +9,14 @@
 #   oci-image-import -- pulls nginx:alpine via mkrootfs.sh --image, validates the
 #                       libext2fs-based ownership rewrite
 #   integration     -- needs build-kbox artifacts, runs integration + stress tests
+#   network-stats   -- needs build-kbox artifacts, runs statistical network flakiness tests
 #
 # All independent jobs run in parallel. integration-tests waits for build-kbox only.
 name: Build and Test
 
 on:
   push:
-    branches: [main, infrastructure]
+    branches: [ "**" ]
   pull_request:
     branches: [main]
 
@@ -245,3 +246,68 @@ jobs:
         run: ./scripts/run-stress.sh ./kbox alpine.ext4
         env:
           STRESS_TIMEOUT: 120
+
+  # ---- Network Statistical Flakiness Test ----
+  network-stats:
+    needs: build-kbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: kbox-build
+
+      - name: Restore permissions
+        run: |
+          chmod +x kbox
+
+      - name: Run Statistical Network Test
+        run: |
+          set +e
+          TOTAL_TRIALS=100
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+
+          echo "Starting statistical run of $TOTAL_TRIALS trials..."
+          echo "Targeting www.google.com with a 2-second throttle to prevent IP bans."
+          echo "------------------------------------------------"
+
+          for i in $(seq 1 $TOTAL_TRIALS); do
+            # Run the kbox command and capture both stdout and stderr
+            OUTPUT=$(./kbox -S alpine.ext4 --net -- /bin/sh -c "wget -S -O /dev/null http://www.google.com/ 2>&1 || true")
+
+            # Replicate 'expect_output' logic by checking if the expected string exists in the output
+            if echo "$OUTPUT" | grep -q "Connecting to"; then
+               ((SUCCESS_COUNT++))
+               echo "Trial $i/$TOTAL_TRIALS: SUCCESS"
+            else
+               ((FAIL_COUNT++))
+               echo "Trial $i/$TOTAL_TRIALS: FAILED"
+               echo "[DEBUG OUTPUT]:"
+               echo "$OUTPUT"
+               echo "------------------------------------------------"
+            fi
+
+            # Throttle to keep Google and GitHub happy
+            sleep 2
+          done
+
+          echo "------------------------------------------------"
+          echo "--- FINAL STATISTICS ---"
+          echo "Total Trials: $TOTAL_TRIALS"
+          echo "Successful:   $SUCCESS_COUNT"
+          echo "Failed:       $FAIL_COUNT"
+
+          FAIL_RATE=$(( FAIL_COUNT * 100 / TOTAL_TRIALS ))
+          echo "FAILURE RATE: $FAIL_RATE%"
+
+          # Uncomment the lines below if you want the workflow to FAIL when flakiness is detected
+          # if [ $FAIL_COUNT -gt 0 ]; then
+          #   echo "::error::Network test failed $FAIL_COUNT times."
+          #   exit 1
+          # fi
+          set -e
