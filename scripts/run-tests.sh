@@ -409,7 +409,7 @@ if "$KBOX" -S "$ROOTFS" --net -- /bin/true 2> /dev/null; then
     # fail (busybox wget vs chunked encoding / virtual hosting), so
     # we check for the "Connecting to" line which proves DNS + TCP.
     expect_output "net-wget-external" "Connecting to" \
-        "$KBOX" -S "$ROOTFS" --net -- /bin/sh -c "ping www.google.com 2>&1 || true"
+        "$KBOX" -S "$ROOTFS" --net -- /bin/sh -c "wget -4 -S -O /dev/null http://www.google.com/ 2>&1 || true"
 else
     for t in net-dns-test net-ping-gateway net-resolv-conf net-wget-external; do
         printf "  %-40s ${YELLOW}SKIP${NC} (no SLIRP support)\n" "$t"
